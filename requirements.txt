@@ -1,0 +1,8 @@
+pypdf>=4.0
+PyMuPDF>=1.24
+Pillow>=10.0
+img2pdf>=0.5
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9
+pytest>=8.0

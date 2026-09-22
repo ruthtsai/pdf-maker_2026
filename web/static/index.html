@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>PDF／影像合併與轉換工具</title>
+<link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+<header class="app-header">
+  <h1>PDF／影像合併與轉換工具</h1>
+  <p class="subtitle">完全本機處理，不會上傳任何資料</p>
+</header>
+
+<nav class="tabs">
+  <button class="tab-btn active" data-tab="merge">合併</button>
+  <button class="tab-btn" data-tab="convert">PDF 轉影像</button>
+</nav>
+
+<main>
+  <!-- ============ 合併頁籤 ============ -->
+  <section id="tab-merge" class="tab-panel active">
+    <div id="merge-dropzone" class="dropzone">
+      <p>拖曳 PDF／JPG／PNG 檔案到這裡，或</p>
+      <button id="merge-add-btn" class="btn">新增檔案</button>
+      <input id="merge-file-input" type="file" multiple accept=".pdf,.jpg,.jpeg,.png" hidden />
+    </div>
+
+    <ul id="merge-file-list" class="file-list"></ul>
+
+    <div class="options-row">
+      <label>輸出頁面尺寸
+        <select id="opt-page-size">
+          <option value="original">沿用原尺寸</option>
+          <option value="a4">統一縮放為 A4</option>
+        </select>
+      </label>
+      <label>影像頁面邊界
+        <select id="opt-image-fit">
+          <option value="center">留白置中</option>
+          <option value="fill">滿版</option>
+        </select>
+      </label>
+      <label>輸出檔名
+        <input id="merge-output-name" type="text" value="merged.pdf" />
+      </label>
+    </div>
+
+    <div class="action-row">
+      <button id="merge-start-btn" class="btn btn-primary" disabled>開始合併</button>
+    </div>
+
+    <div id="merge-progress" class="progress-area hidden">
+      <div class="progress-bar"><div class="progress-bar-fill"></div></div>
+      <span class="progress-label"></span>
+      <button class="btn btn-cancel">取消</button>
+    </div>
+
+    <div id="merge-result" class="result-area hidden"></div>
+  </section>
+
+  <!-- ============ 轉換頁籤 ============ -->
+  <section id="tab-convert" class="tab-panel">
+    <div class="dropzone" id="convert-dropzone">
+      <p>拖曳單一 PDF 檔案到這裡，或</p>
+      <button id="convert-add-btn" class="btn">選擇 PDF</button>
+      <input id="convert-file-input" type="file" accept=".pdf" hidden />
+    </div>
+
+    <div id="convert-info" class="pdf-info hidden"></div>
+
+    <div class="options-row">
+      <label>頁碼範圍（例如 1-5,8,10-12，留空表示全部）
+        <input id="opt-page-range" type="text" placeholder="全部頁面" />
+      </label>
+      <label>輸出格式
+        <select id="opt-format">
+          <option value="png">PNG</option>
+          <option value="jpg">JPG</option>
+        </select>
+      </label>
+      <label>解析度（DPI，72–600）
+        <input id="opt-dpi" type="number" min="72" max="600" value="200" />
+      </label>
+      <label id="opt-jpg-quality-label" class="hidden">JPG 品質（1–100）
+        <input id="opt-jpg-quality" type="number" min="1" max="100" value="90" />
+      </label>
+      <label>輸出方式
+        <select id="opt-output-mode">
+          <option value="separate">各自存檔</option>
+          <option value="zip">打包成 ZIP</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="action-row">
+      <button id="convert-start-btn" class="btn btn-primary" disabled>開始轉換</button>
+    </div>
+
+    <div id="convert-progress" class="progress-area hidden">
+      <div class="progress-bar"><div class="progress-bar-fill"></div></div>
+      <span class="progress-label"></span>
+      <button class="btn btn-cancel">取消</button>
+    </div>
+
+    <div id="convert-result" class="result-area hidden"></div>
+  </section>
+</main>
+
+<div id="error-toast" class="error-toast hidden"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>
