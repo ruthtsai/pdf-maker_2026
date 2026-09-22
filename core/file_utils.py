@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import atexit
 import base64
+import re
 import shutil
 import tempfile
 import uuid
@@ -53,8 +54,21 @@ def save_bytes_to_upload(data: bytes, original_name: str) -> Path:
     return dest
 
 
+_UNSAFE_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+
+
+def sanitize_filename(name: str, fallback: str) -> str:
+    """Strips any path components / traversal segments from a user-supplied
+    output filename before it is used to build a path on disk. Without this,
+    a name like "../../evil.pdf" would write outside the output temp dir."""
+    name = Path(name.strip()).name.strip(". ")
+    name = _UNSAFE_FILENAME_CHARS.sub("_", name)
+    return name or fallback
+
+
 def new_output_path(filename: str) -> Path:
     """Returns a collision-free path inside the output temp dir."""
+    filename = sanitize_filename(filename, fallback="output")
     dest = _OUTPUT_DIR / filename
     if not dest.exists():
         return dest

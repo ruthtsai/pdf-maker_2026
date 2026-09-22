@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import shutil
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Literal
@@ -25,6 +25,51 @@ _passwords: dict[str, str] = {}
 _store_lock = threading.Lock()
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+# An uploaded file that sits unused (tab left open, never merged/converted) would
+# otherwise only be cleaned up when the whole process exits. Sweep it away after
+# it's been idle this long, unless a job is actively reading it.
+UPLOAD_TTL_SECONDS = 30 * 60
+_CLEANUP_INTERVAL_SECONDS = 5 * 60
+
+_active_file_ids: set[str] = set()
+_active_lock = threading.Lock()
+
+
+def _mark_active(file_ids: list[str]) -> None:
+    with _active_lock:
+        _active_file_ids.update(file_ids)
+
+
+def _unmark_active(file_ids: list[str]) -> None:
+    with _active_lock:
+        _active_file_ids.difference_update(file_ids)
+
+
+def _cleanup_stale_uploads() -> None:
+    now = time.time()
+    with _store_lock, _active_lock:
+        stale_ids = [
+            fid
+            for fid, item in _files.items()
+            if fid not in _active_file_ids and (now - item.touched_at) > UPLOAD_TTL_SECONDS
+        ]
+        for fid in stale_ids:
+            item = _files.pop(fid)
+            _passwords.pop(fid, None)
+            Path(item.stored_path).unlink(missing_ok=True)
+
+
+def _cleanup_loop() -> None:
+    while True:
+        time.sleep(_CLEANUP_INTERVAL_SECONDS)
+        try:
+            _cleanup_stale_uploads()
+        except Exception:
+            pass
+
+
+threading.Thread(target=_cleanup_loop, daemon=True).start()
 
 
 # ---------- schemas ----------
@@ -142,6 +187,7 @@ def unlock_file(file_id: str, payload: PasswordPayload):
     item.thumbnail_data_url = thumb
     item.status = FileStatus.OK
     item.error_message = None
+    item.touched_at = time.time()
     _passwords[file_id] = payload.password
 
     return _file_item_to_json(item)
@@ -183,6 +229,9 @@ def start_merge(options: MergeOptions):
         names = "、".join(i.original_name for i in skipped)
         job.warning = f"已略過尚未就緒的檔案：{names}"
 
+    file_ids = [i.id for i in items]
+    _mark_active(file_ids)
+
     def task(job: Job):
         try:
             return merger.merge_files(
@@ -196,6 +245,8 @@ def start_merge(options: MergeOptions):
             )
         except merger.MergeError as exc:
             raise RuntimeError(f"{exc.file_name}：{exc.message}") from exc
+        finally:
+            _unmark_active(file_ids)
 
     job_manager.run(job, task)
     return {"job_id": job.id}
@@ -221,26 +272,32 @@ def start_convert(options: ConvertOptions):
     except converter.PageRangeError as exc:
         raise HTTPException(400, detail=str(exc))
 
-    base_name = options.output_name.strip() or Path(item.original_name).stem
+    raw_base_name = options.output_name.strip() or Path(item.original_name).stem
+    base_name = file_utils.sanitize_filename(raw_base_name, fallback="converted")
     out_dir = file_utils.output_dir() / uuid.uuid4().hex
     job = job_manager.create()
     if skipped:
         job.warning = f"已略過不存在的頁碼：{', '.join(map(str, skipped))}"
 
+    _mark_active([item.id])
+
     def task(job: Job):
-        return converter.convert_pdf(
-            Path(item.stored_path),
-            page_indexes,
-            out_dir,
-            base_name,
-            fmt=options.format,
-            dpi=options.dpi,
-            jpg_quality=options.jpg_quality,
-            pack_zip=options.pack_zip,
-            password=_passwords.get(item.id),
-            progress_cb=job.progress_cb,
-            cancel_check=job.cancel_check,
-        )
+        try:
+            return converter.convert_pdf(
+                Path(item.stored_path),
+                page_indexes,
+                out_dir,
+                base_name,
+                fmt=options.format,
+                dpi=options.dpi,
+                jpg_quality=options.jpg_quality,
+                pack_zip=options.pack_zip,
+                password=_passwords.get(item.id),
+                progress_cb=job.progress_cb,
+                cancel_check=job.cancel_check,
+            )
+        finally:
+            _unmark_active([item.id])
 
     job_manager.run(job, task)
     return {"job_id": job.id, "skipped_pages": skipped}

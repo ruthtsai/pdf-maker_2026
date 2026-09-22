@@ -51,6 +51,40 @@ function hideResult(id) {
   area.innerHTML = "";
 }
 
+// ---------- File System Access API (optional "save as" flow) ----------
+// Chromium-only; everything falls back to the plain <a download> link below
+// when unsupported, so this is pure progressive enhancement.
+
+function saveAsSupported() {
+  return "showSaveFilePicker" in window && "showDirectoryPicker" in window;
+}
+
+async function fetchBlob(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`下載失敗（${res.status}）`);
+  return res.blob();
+}
+
+async function writeBlobToHandle(fileHandle, blob) {
+  const writable = await fileHandle.createWritable();
+  await writable.write(blob);
+  await writable.close();
+}
+
+async function saveResultToTarget(job, target) {
+  if (target.type === "file") {
+    const blob = await fetchBlob(job.download_url);
+    await writeBlobToHandle(target.handle, blob);
+    return `已儲存為「${target.handle.name}」`;
+  }
+  for (const f of job.files) {
+    const blob = await fetchBlob(f.url);
+    const fileHandle = await target.handle.getFileHandle(f.name, { create: true });
+    await writeBlobToHandle(fileHandle, blob);
+  }
+  return `已儲存 ${job.files.length} 個檔案到「${target.handle.name}」資料夾`;
+}
+
 // ---------- tabs ----------
 
 function setupTabs() {
@@ -100,7 +134,7 @@ function hideProgress(prefix) {
   document.getElementById(`${prefix}-progress`).classList.add("hidden");
 }
 
-function showResult(prefix, job) {
+function showResult(prefix, job, savedMessage) {
   const area = document.getElementById(`${prefix}-result`);
   area.classList.remove("hidden", "is-error");
   area.innerHTML = "";
@@ -112,8 +146,16 @@ function showResult(prefix, job) {
     area.appendChild(warn);
   }
 
+  if (savedMessage) {
+    const saved = document.createElement("div");
+    saved.textContent = savedMessage;
+    saved.style.marginBottom = "6px";
+    saved.style.fontWeight = "600";
+    area.appendChild(saved);
+  }
+
   const label = document.createElement("div");
-  label.textContent = "處理完成：";
+  label.textContent = savedMessage ? "或透過瀏覽器下載：" : "處理完成：";
   label.style.marginBottom = "6px";
   area.appendChild(label);
 
@@ -139,7 +181,7 @@ function showResultError(prefix, message) {
   area.textContent = `處理失敗：${message}`;
 }
 
-function watchJob(jobId, prefix) {
+function watchJob(jobId, prefix, saveTarget) {
   const cancelBtn = document.querySelector(`#${prefix}-progress .btn-cancel`);
   cancelBtn.onclick = () =>
     apiFetch(`${API}/jobs/${jobId}/cancel`, { method: "POST" }).catch(() => {});
@@ -162,7 +204,17 @@ function watchJob(jobId, prefix) {
       }
       hideProgress(prefix);
       if (job.status === "done") {
-        showResult(prefix, job);
+        if (saveTarget) {
+          try {
+            const savedMessage = await saveResultToTarget(job, saveTarget);
+            showResult(prefix, job, savedMessage);
+          } catch (err) {
+            showResult(prefix, job);
+            showError(`寫入檔案失敗，請改用下方連結手動下載：${err.message}`);
+          }
+        } else {
+          showResult(prefix, job);
+        }
       } else if (job.status === "cancelled") {
         showError("已取消處理");
       } else {
@@ -347,12 +399,30 @@ async function removeMergeFile(id) {
 
 async function startMerge() {
   const btn = document.getElementById("merge-start-btn");
+  const outputName = document.getElementById("merge-output-name").value || "merged.pdf";
+  const fileName = outputName.toLowerCase().endsWith(".pdf") ? outputName : `${outputName}.pdf`;
+
+  let saveTarget = null;
+  if (document.getElementById("merge-save-as").checked && saveAsSupported()) {
+    try {
+      const handle = await window.showSaveFilePicker({
+        suggestedName: fileName,
+        types: [{ description: "PDF", accept: { "application/pdf": [".pdf"] } }],
+      });
+      saveTarget = { type: "file", handle };
+    } catch (err) {
+      if (err.name === "AbortError") return;
+      showError(`無法選擇儲存位置：${err.message}`);
+      return;
+    }
+  }
+
   btn.disabled = true;
   hideResult("merge-result");
 
   const payload = {
     file_ids: mergeFiles.map((f) => f.id),
-    output_name: document.getElementById("merge-output-name").value || "merged.pdf",
+    output_name: outputName,
     page_size: document.getElementById("opt-page-size").value,
     image_fit: document.getElementById("opt-image-fit").value,
   };
@@ -363,7 +433,7 @@ async function startMerge() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    await watchJob(job_id, "merge");
+    await watchJob(job_id, "merge", saveTarget);
   } catch (err) {
     showError(`合併失敗：${err.message}`);
   } finally {
@@ -447,6 +517,29 @@ async function startConvert() {
     return;
   }
 
+  const packZip = document.getElementById("opt-output-mode").value === "zip";
+
+  let saveTarget = null;
+  if (document.getElementById("convert-save-as").checked && saveAsSupported()) {
+    try {
+      if (packZip) {
+        const baseName = convertFile.name.replace(/\.pdf$/i, "");
+        const handle = await window.showSaveFilePicker({
+          suggestedName: `${baseName}.zip`,
+          types: [{ description: "ZIP", accept: { "application/zip": [".zip"] } }],
+        });
+        saveTarget = { type: "file", handle };
+      } else {
+        const handle = await window.showDirectoryPicker();
+        saveTarget = { type: "dir", handle };
+      }
+    } catch (err) {
+      if (err.name === "AbortError") return;
+      showError(`無法選擇儲存位置：${err.message}`);
+      return;
+    }
+  }
+
   btn.disabled = true;
   hideResult("convert-result");
 
@@ -456,7 +549,7 @@ async function startConvert() {
     format: document.getElementById("opt-format").value,
     dpi,
     jpg_quality: Number(document.getElementById("opt-jpg-quality").value),
-    pack_zip: document.getElementById("opt-output-mode").value === "zip",
+    pack_zip: packZip,
     output_name: "",
   };
 
@@ -466,7 +559,7 @@ async function startConvert() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    await watchJob(job_id, "convert");
+    await watchJob(job_id, "convert", saveTarget);
   } catch (err) {
     showError(`轉換失敗：${err.message}`);
   } finally {
@@ -478,6 +571,11 @@ async function startConvert() {
 
 document.addEventListener("DOMContentLoaded", () => {
   setupTabs();
+
+  if (saveAsSupported()) {
+    document.getElementById("merge-save-as-row").classList.remove("hidden");
+    document.getElementById("convert-save-as-row").classList.remove("hidden");
+  }
 
   setupDropzone(
     document.getElementById("merge-dropzone"),

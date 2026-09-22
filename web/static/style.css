@@ -194,7 +194,21 @@ main { max-width: 880px; margin: 0 auto; padding: 24px 32px 60px; }
   color: var(--text);
 }
 
-.action-row { margin-bottom: 16px; }
+.action-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 16px;
+}
+.save-as-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+  cursor: pointer;
+}
+.save-as-toggle input { cursor: pointer; }
 
 .progress-area {
   display: flex;
