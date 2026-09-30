@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 import threading
 import time
 import uuid
@@ -24,7 +25,12 @@ _files: dict[str, FileItem] = {}
 _passwords: dict[str, str] = {}
 _store_lock = threading.Lock()
 
-STATIC_DIR = Path(__file__).parent / "static"
+# A PyInstaller onefile build extracts bundled data under sys._MEIPASS instead of
+# next to this .py file (which isn't a real file on disk once frozen).
+if getattr(sys, "frozen", False):
+    STATIC_DIR = Path(sys._MEIPASS) / "web" / "static"
+else:
+    STATIC_DIR = Path(__file__).parent / "static"
 
 # An uploaded file that sits unused (tab left open, never merged/converted) would
 # otherwise only be cleaned up when the whole process exits. Sweep it away after
