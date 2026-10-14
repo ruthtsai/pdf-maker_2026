@@ -587,6 +587,125 @@ function edOpenInsertDialog() {
   });
 }
 
+// ---------- replace pages ----------
+
+function edBuildCompareRow(targetPos, oldPage, newSource, newIdx) {
+  const side = (page, tag, caption) => {
+    const fit = edFit(page, 150, 190);
+    return h(
+      "div",
+      { class: "compare-side" },
+      h("span", { class: `tag ${tag}` }, tag === "old" ? "取代前" : "取代後"),
+      h(
+        "div",
+        { class: "thumb-box" },
+        h("img", { src: edImageUrl(page, 300), style: `width:${fit.w}px;height:${fit.h}px;transform:rotate(${page.rot}deg)` })
+      ),
+      h("div", { class: "compare-caption" }, caption)
+    );
+  };
+  const newPage = { src: newSource.id, idx: newIdx, rot: 0 };
+  const oldName = oldPage.src === ed.baseId ? "" : `${ed.sources[oldPage.src].name} `;
+  return h(
+    "div",
+    { class: "compare-row" },
+    side(oldPage, "old", `第 ${targetPos} 頁（${oldName}原第 ${oldPage.idx + 1} 頁）`),
+    h("span", { class: "compare-arrow" }, "→"),
+    side(newPage, "new", `${newSource.name} 第 ${newIdx + 1} 頁`)
+  );
+}
+
+// pairs: [{pos (1-based current position), srcIdx (0-based)}]
+function edApplyReplace(source, pairs) {
+  const fresh = [];
+  pairs.forEach(({ pos, srcIdx }) => {
+    const page = edNewPage(source.id, srcIdx, 0);
+    ed.pages[pos - 1] = page;
+    fresh.push(page.uid);
+  });
+  edCommit();
+  edSelectUids(fresh);
+}
+
+function edOpenReplaceDialog() {
+  const total = ed.pages.length;
+  const pos = edSelectedPositions();
+  const srcRange = h("input", { type: "text", placeholder: "例如 1-2", disabled: true });
+  const targetRange = h("input", { type: "text", value: pos.length ? edCompactRange(pos) : "", placeholder: "例如 3-4" });
+  const err = h("div", { class: "dialog-error" });
+  let proceeding = false;
+  const picker = edSourcePicker((src) => {
+    srcRange.disabled = !src;
+    err.textContent = "";
+  });
+
+  const dialog = openModal({
+    title: "取代頁面",
+    body: h(
+      "div",
+      {},
+      picker.el,
+      h(
+        "div",
+        { class: "field-row" },
+        h("label", { class: "field" }, "來源 PDF 的頁碼", srcRange),
+        h("label", { class: "field" }, `要被取代的頁碼（目前共 ${total} 頁）`, targetRange)
+      ),
+      h("div", { class: "picker-info" }, "來源頁依序取代目標頁（第 1 個來源頁取代第 1 個目標頁，以此類推），兩邊的頁數必須相同。"),
+      err
+    ),
+    actions: [
+      { label: "取消" },
+      {
+        label: "預覽對照",
+        primary: true,
+        onClick: () => {
+          const src = picker.source;
+          if (!src) {
+            err.textContent = "請先選擇來源 PDF";
+            return true;
+          }
+          let srcNums, targetNums;
+          try {
+            srcNums = edParseRange(srcRange.value, src.page_count, "來源頁碼");
+            targetNums = edParseRange(targetRange.value, total, "目標頁碼");
+          } catch (e) {
+            err.textContent = e.message;
+            return true;
+          }
+          if (srcNums.length !== targetNums.length) {
+            err.textContent = `來源有 ${srcNums.length} 頁、目標有 ${targetNums.length} 頁，數量需相同`;
+            return true;
+          }
+          proceeding = true;
+          const pairs = targetNums.map((p, i) => ({ pos: p, srcIdx: srcNums[i] - 1 }));
+          edOpenReplaceCompare(src, pairs, picker);
+        },
+      },
+    ],
+    onClose: () => {
+      if (!proceeding) picker.cleanup();
+    },
+  });
+  return dialog;
+}
+
+function edOpenReplaceCompare(source, pairs, picker) {
+  openModal({
+    title: `取代前後對照（共 ${pairs.length} 頁）`,
+    body: h(
+      "div",
+      { class: "compare-list" },
+      pairs.map(({ pos, srcIdx }) => edBuildCompareRow(pos, ed.pages[pos - 1], source, srcIdx))
+    ),
+    actions: [
+      { label: "取消" },
+      { label: "確認取代", primary: true, onClick: () => { edApplyReplace(source, pairs); } },
+    ],
+    onClose: () => picker.cleanup(),
+  });
+}
+
 // ---------- single page preview ----------
 
 function edOpenPreview(startUid) {
@@ -728,6 +847,7 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("edit-redo").addEventListener("click", edRedo);
   document.getElementById("edit-move-btn").addEventListener("click", edOpenMoveDialog);
   document.getElementById("edit-insert-btn").addEventListener("click", edOpenInsertDialog);
+  document.getElementById("edit-replace-btn").addEventListener("click", edOpenReplaceDialog);
   document.querySelectorAll("#edit-toolbar [data-rotate]").forEach((btn) => {
     btn.addEventListener("click", () => edRotate(Number(btn.dataset.rotate)));
   });

@@ -165,3 +165,13 @@
 .field-row { display: flex; gap: 12px; }
 .field-row > label.field { flex: 1; }
 .page-grid.drop-end { box-shadow: inset 0 -4px 0 var(--primary); }
+
+.compare-list { display: flex; flex-direction: column; gap: 10px; max-height: 60vh; overflow: auto; }
+.compare-row { display: flex; align-items: center; justify-content: center; gap: 18px; padding: 10px; border: 1px solid var(--border); border-radius: 8px; }
+.compare-side { display: flex; flex-direction: column; align-items: center; gap: 4px; width: 180px; }
+.compare-side .thumb-box { width: 150px; height: 190px; }
+.compare-side .tag { font-size: 11px; padding: 1px 8px; border-radius: 10px; }
+.compare-side .tag.old { background: #fee2e2; color: #991b1b; }
+.compare-side .tag.new { background: #dcfce7; color: #166534; }
+.compare-arrow { font-size: 22px; color: var(--muted); }
+.compare-caption { font-size: 12px; color: var(--muted); text-align: center; }
