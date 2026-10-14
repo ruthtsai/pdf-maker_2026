@@ -246,6 +246,17 @@ function edSelectNone() {
   edRefreshSelection();
 }
 
+// ---------- rotate ----------
+
+// Applies to the selection, or to the whole document when nothing is selected.
+function edRotate(degrees) {
+  const targets = ed.selection.size ? ed.pages.filter((p) => ed.selection.has(p.uid)) : ed.pages;
+  targets.forEach((p) => {
+    p.rot = (p.rot + degrees) % 360;
+  });
+  edRender();
+}
+
 // ---------- single page preview ----------
 
 function edOpenPreview(startUid) {
@@ -378,4 +389,7 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("edit-select-all").addEventListener("click", edSelectAll);
   document.getElementById("edit-select-none").addEventListener("click", edSelectNone);
   document.getElementById("edit-export-btn").addEventListener("click", edOpenExportDialog);
+  document.querySelectorAll("#edit-toolbar [data-rotate]").forEach((btn) => {
+    btn.addEventListener("click", () => edRotate(Number(btn.dataset.rotate)));
+  });
 });
