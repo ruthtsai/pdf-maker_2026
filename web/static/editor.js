@@ -11,6 +11,8 @@ const ed = {
   sources: {}, // fileId -> {id, name, page_count, status, pages:[{w,h,rotation}]}
   baseId: null,
   pages: [], // [{uid, src, idx, rot}]
+  labels: [], // page-label rules [{start (0-based), style, prefix, first}]
+  numbering: null, // printed page numbers {v_pos,h_pos,fmt,start_page,start_number,font_size,margin} | null
   selection: new Set(), // uids
   anchor: null, // uid used as the start of a Shift range
   nextUid: 1,
@@ -141,7 +143,7 @@ function edSelectedPositions() {
 // ---------- history (undo / redo) ----------
 
 function edSnapshot() {
-  return JSON.stringify({ pages: ed.pages });
+  return JSON.stringify({ pages: ed.pages, labels: ed.labels, numbering: ed.numbering });
 }
 
 function edUpdateHistoryButtons() {
@@ -168,7 +170,10 @@ function edCommit() {
 function edGoto(index) {
   if (index < 0 || index >= ed.history.length) return;
   ed.hIndex = index;
-  ed.pages = JSON.parse(ed.history[index]).pages;
+  const snap = JSON.parse(ed.history[index]);
+  ed.pages = snap.pages;
+  ed.labels = snap.labels;
+  ed.numbering = snap.numbering;
   const alive = new Set(ed.pages.map((p) => p.uid));
   ed.selection = new Set([...ed.selection].filter((u) => alive.has(u)));
   edUpdateHistoryButtons();
@@ -233,9 +238,16 @@ async function edStartSession(item) {
   const previous = Object.keys(ed.sources);
   ed.sources = { [item.id]: { id: item.id, name: item.name, page_count: item.page_count, status: item.status, pages: null } };
   ed.baseId = item.id;
-  await edLoadInfo(item.id);
+  const info = await edLoadInfo(item.id);
   ed.nextUid = 1;
   ed.pages = Array.from({ length: item.page_count }, (_, i) => edNewPage(item.id, i));
+  ed.labels = (info.labels || []).map((l) => ({
+    start: l.startpage || 0,
+    style: l.style || "",
+    prefix: l.prefix || "",
+    first: l.firstpagenum || 1,
+  }));
+  ed.numbering = null;
   ed.selection = new Set();
   ed.anchor = null;
   edResetHistory();
@@ -706,6 +718,271 @@ function edOpenReplaceCompare(source, pairs, picker) {
   });
 }
 
+// ---------- page numbers ----------
+
+const ED_LABEL_STYLES = [
+  ["D", "阿拉伯數字 1, 2, 3"],
+  ["r", "小寫羅馬 i, ii, iii"],
+  ["R", "大寫羅馬 I, II, III"],
+  ["a", "小寫字母 a, b, c"],
+  ["A", "大寫字母 A, B, C"],
+  ["", "無編號（只有前綴）"],
+];
+const ED_NUMBER_FORMATS = [
+  ["number", "1, 2, 3"],
+  ["roman", "i, ii, iii"],
+  ["roman_upper", "I, II, III"],
+  ["of", "第 N 頁／共 M 頁"],
+];
+
+function edNumInput(value, min, max, onInput) {
+  const el = h("input", { type: "number", min: String(min), max: String(max), value: String(value) });
+  el.addEventListener("input", () => onInput(Number(el.value)));
+  return el;
+}
+
+function edSelect(options, value, onChange) {
+  const el = h(
+    "select",
+    {},
+    options.map(([v, label]) => h("option", { value: v, selected: v === value }, label))
+  );
+  el.addEventListener("change", () => onChange(el.value));
+  return el;
+}
+
+function edOpenNumberingDialog() {
+  const total = ed.pages.length;
+  let rules = ed.labels.map((r) => ({ ...r }));
+  let stampOn = !!ed.numbering;
+  const stamp = ed.numbering
+    ? { ...ed.numbering }
+    : { v_pos: "bottom", h_pos: "center", fmt: "number", start_page: 1, start_number: 1, font_size: 10, margin: 28 };
+  let previewIndex = Math.min(Math.max(stamp.start_page, 1), total) - 1;
+  let timer = null;
+  let objectUrl = null;
+  let token = 0;
+  const err = h("div", { class: "dialog-error" });
+
+  // ----- live preview (rendered by the server exactly like the export) -----
+  const previewImg = h("img", { alt: "" });
+  const previewNote = h("div", { class: "picker-info" }, "");
+  async function refreshPreview() {
+    const mine = ++token;
+    previewNote.textContent = stampOn ? `預覽第 ${previewIndex + 1} 頁` : "尚未啟用蓋印頁碼，預覽為原始頁面";
+    try {
+      const body = edRecipe("preview.pdf", { page_labels: [], page_numbers: stampOn ? { ...stamp } : null });
+      const res = await fetch(`${API}/edit/preview?index=${previewIndex}&w=520`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText);
+      const url = URL.createObjectURL(await res.blob());
+      if (mine !== token) return URL.revokeObjectURL(url);
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      objectUrl = url;
+      previewImg.src = url;
+    } catch (e) {
+      previewNote.textContent = `預覽失敗：${e.message}`;
+    }
+  }
+  const schedulePreview = () => {
+    clearTimeout(timer);
+    timer = setTimeout(refreshPreview, 250);
+  };
+
+  // ----- label rules -----
+  const rulesBox = h("div", {});
+  function renderRules() {
+    rulesBox.innerHTML = "";
+    rules.forEach((r, i) => {
+      rulesBox.append(
+        h(
+          "div",
+          { class: "rule-row" },
+          "從第",
+          edNumInput(r.start + 1, 1, total, (v) => (r.start = v - 1)),
+          "頁起",
+          edSelect(ED_LABEL_STYLES, r.style, (v) => (r.style = v)),
+          "前綴",
+          h("input", { type: "text", value: r.prefix, oninput: (e) => (r.prefix = e.target.value) }),
+          "起始號碼",
+          edNumInput(r.first, 1, 99999, (v) => (r.first = v)),
+          h(
+            "button",
+            {
+              class: "btn-icon",
+              title: "移除此規則",
+              onclick: () => {
+                rules.splice(i, 1);
+                renderRules();
+              },
+            },
+            "✕"
+          )
+        )
+      );
+    });
+    if (!rules.length) rulesBox.append(h("div", { class: "picker-info" }, "目前沒有頁碼標籤規則（輸出檔不寫入頁碼標籤）"));
+  }
+  renderRules();
+
+  const frontInput = h("input", { type: "number", min: "1", max: String(Math.max(total - 1, 1)), value: "3" });
+
+  // ----- stamp controls -----
+  const stampBox = h(
+    "div",
+    {},
+    h(
+      "div",
+      { class: "inline-row" },
+      "位置：",
+      edSelect([["top", "頁首"], ["bottom", "頁尾"]], stamp.v_pos, (v) => { stamp.v_pos = v; schedulePreview(); }),
+      edSelect([["left", "靠左"], ["center", "置中"], ["right", "靠右"]], stamp.h_pos, (v) => { stamp.h_pos = v; schedulePreview(); })
+    ),
+    h(
+      "div",
+      { class: "inline-row" },
+      "格式：",
+      edSelect(ED_NUMBER_FORMATS, stamp.fmt, (v) => { stamp.fmt = v; schedulePreview(); })
+    ),
+    h(
+      "div",
+      { class: "inline-row" },
+      "從第",
+      edNumInput(stamp.start_page, 1, total, (v) => { stamp.start_page = v; schedulePreview(); }),
+      "頁開始蓋印，起始號碼",
+      edNumInput(stamp.start_number, 0, 99999, (v) => { stamp.start_number = v; schedulePreview(); }),
+      "字型大小",
+      edNumInput(stamp.font_size, 4, 72, (v) => { stamp.font_size = v; schedulePreview(); })
+    ),
+    h(
+      "div",
+      { class: "inline-row" },
+      "預覽第",
+      edNumInput(previewIndex + 1, 1, total, (v) => {
+        previewIndex = Math.min(Math.max(v || 1, 1), total) - 1;
+        schedulePreview();
+      }),
+      "頁"
+    )
+  );
+  const enable = h("input", { type: "checkbox", checked: stampOn });
+  const syncEnabled = () => {
+    stampBox.style.opacity = stampOn ? "1" : ".45";
+    stampBox.style.pointerEvents = stampOn ? "auto" : "none";
+  };
+  enable.addEventListener("change", () => {
+    stampOn = enable.checked;
+    syncEnabled();
+    schedulePreview();
+  });
+  syncEnabled();
+
+  const body = h(
+    "div",
+    { class: "num-layout" },
+    h(
+      "div",
+      { class: "num-controls" },
+      h(
+        "div",
+        { class: "section-box" },
+        h("div", { class: "section-title" }, "① 頁碼標籤（PDF 閱讀器頁碼框顯示的編號）"),
+        h(
+          "div",
+          { class: "inline-row" },
+          "快速設定：前言",
+          frontInput,
+          "頁用羅馬數字，正文從 1 起算",
+          h(
+            "button",
+            {
+              class: "btn",
+              onclick: () => {
+                const n = Number(frontInput.value);
+                if (!Number.isInteger(n) || n < 1 || n >= total) {
+                  err.textContent = `前言頁數需介於 1 到 ${total - 1}`;
+                  return;
+                }
+                err.textContent = "";
+                rules = [
+                  { start: 0, style: "r", prefix: "", first: 1 },
+                  { start: n, style: "D", prefix: "", first: 1 },
+                ];
+                renderRules();
+              },
+            },
+            "套用"
+          )
+        ),
+        rulesBox,
+        h(
+          "button",
+          {
+            class: "btn",
+            onclick: () => {
+              rules.push({ start: 0, style: "D", prefix: "", first: 1 });
+              renderRules();
+            },
+          },
+          "＋ 新增規則"
+        ),
+        h("div", { class: "picker-info" }, "頁數以輸出後的順序計算；每條規則從指定頁一直套用到下一條規則之前。")
+      ),
+      h(
+        "div",
+        { class: "section-box" },
+        h("div", { class: "section-title" }, h("label", {}, enable, " ② 在頁面上蓋印頁碼")),
+        stampBox
+      ),
+      err
+    ),
+    h("div", { class: "num-preview" }, h("div", { class: "num-preview-frame" }, previewImg), previewNote)
+  );
+
+  const fail = (message) => {
+    err.textContent = message;
+    return true;
+  };
+
+  const dialog = openModal({
+    title: "頁碼設定",
+    body,
+    actions: [
+      { label: "取消" },
+      {
+        label: "套用",
+        primary: true,
+        onClick: () => {
+          for (const r of rules) {
+            if (!Number.isInteger(r.start) || r.start < 0 || r.start >= total) return fail(`標籤規則的起始頁需介於 1 到 ${total}`);
+            if (!Number.isInteger(r.first) || r.first < 1) return fail("標籤規則的起始號碼需大於等於 1");
+          }
+          if (new Set(rules.map((r) => r.start)).size !== rules.length) return fail("不同規則不能從同一頁開始");
+          if (stampOn) {
+            if (!Number.isInteger(stamp.start_page) || stamp.start_page < 1 || stamp.start_page > total)
+              return fail(`蓋印的起始頁需介於 1 到 ${total}`);
+            if (!Number.isFinite(stamp.start_number) || stamp.start_number < 0) return fail("起始號碼不可為負數");
+            if (!Number.isFinite(stamp.font_size) || stamp.font_size < 4 || stamp.font_size > 72) return fail("字型大小需介於 4–72");
+          }
+          ed.labels = rules.map((r) => ({ ...r })).sort((a, b) => a.start - b.start);
+          ed.numbering = stampOn ? { ...stamp } : null;
+          edCommit();
+        },
+      },
+    ],
+    onClose: () => {
+      clearTimeout(timer);
+      token++;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    },
+  });
+  dialog.backdrop.querySelector(".modal").classList.add("wide");
+  refreshPreview();
+}
+
 // ---------- single page preview ----------
 
 function edOpenPreview(startUid) {
@@ -720,13 +997,45 @@ function edOpenPreview(startUid) {
   const boxW = Math.min(760, window.innerWidth - 220);
   const boxH = Math.min(620, window.innerHeight - 220);
 
+  let objectUrl = null;
+  let showToken = 0;
+
+  async function overlayUrl() {
+    const res = await fetch(`${API}/edit/preview?index=${pos}&w=1100`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(edRecipe("preview.pdf", { page_labels: [] })),
+    });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText);
+    return URL.createObjectURL(await res.blob());
+  }
+
   function show() {
     const page = ed.pages[pos];
-    const fit = edFit(page, boxW, boxH);
-    stageImg.src = edImageUrl(page, 1100);
-    stageImg.style.width = `${fit.w}px`;
-    stageImg.style.height = `${fit.h}px`;
-    stageImg.style.transform = `rotate(${page.rot}deg)`;
+    const token = ++showToken;
+    if (edHasOverlays()) {
+      // The server already applied the page rotation and overlays: show it as-is.
+      const size = edPageSize(page);
+      const vis = page.rot % 180 !== 0 ? { w: size.h, h: size.w } : size;
+      const scale = Math.min(boxW / vis.w, boxH / vis.h);
+      stageImg.style.width = `${vis.w * scale}px`;
+      stageImg.style.height = `${vis.h * scale}px`;
+      stageImg.style.transform = "none";
+      overlayUrl()
+        .then((url) => {
+          if (token !== showToken) return URL.revokeObjectURL(url);
+          if (objectUrl) URL.revokeObjectURL(objectUrl);
+          objectUrl = url;
+          stageImg.src = url;
+        })
+        .catch((err) => showError(`預覽失敗：${err.message}`));
+    } else {
+      const fit = edFit(page, boxW, boxH);
+      stageImg.src = edImageUrl(page, 1100);
+      stageImg.style.width = `${fit.w}px`;
+      stageImg.style.height = `${fit.h}px`;
+      stageImg.style.transform = `rotate(${page.rot}deg)`;
+    }
     stage.style.minHeight = `${boxH + 24}px`;
     label.textContent = `第 ${pos + 1} 頁 / 共 ${ed.pages.length} 頁`;
     prev.disabled = pos === 0;
@@ -748,7 +1057,11 @@ function edOpenPreview(startUid) {
     title: label,
     body: stage,
     actions: [{ label: "關閉" }],
-    onClose: () => document.removeEventListener("keydown", onKey),
+    onClose: () => {
+      document.removeEventListener("keydown", onKey);
+      showToken++;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    },
   });
 }
 
@@ -761,15 +1074,25 @@ function edSummary() {
   const parts = [`原始檔案 ${base.page_count} 頁 → 輸出 ${ed.pages.length} 頁`];
   if (foreign) parts.push(`其中 ${foreign} 頁來自其他 PDF`);
   if (rotated) parts.push(`${rotated} 頁已旋轉`);
+  if (ed.numbering) {
+    const fmt = ED_NUMBER_FORMATS.find((f) => f[0] === ed.numbering.fmt)[1];
+    parts.push(`蓋印頁碼：${fmt}，從第 ${ed.numbering.start_page} 頁開始`);
+  }
+  if (ed.labels.length) parts.push(`頁碼標籤：${ed.labels.length} 條規則`);
   return parts;
 }
 
-function edRecipe(outputName) {
+function edRecipe(outputName, overrides = {}) {
   return {
     pages: ed.pages.map((p) => ({ src: p.src, idx: p.idx, rot: p.rot })),
     output_name: outputName,
+    page_labels: ed.labels,
+    page_numbers: ed.numbering,
+    ...overrides,
   };
 }
+
+const edHasOverlays = () => !!ed.numbering;
 
 function edOpenExportDialog() {
   const base = ed.sources[ed.baseId];
@@ -848,6 +1171,7 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("edit-move-btn").addEventListener("click", edOpenMoveDialog);
   document.getElementById("edit-insert-btn").addEventListener("click", edOpenInsertDialog);
   document.getElementById("edit-replace-btn").addEventListener("click", edOpenReplaceDialog);
+  document.getElementById("edit-numbering-btn").addEventListener("click", edOpenNumberingDialog);
   document.querySelectorAll("#edit-toolbar [data-rotate]").forEach((btn) => {
     btn.addEventListener("click", () => edRotate(Number(btn.dataset.rotate)));
   });

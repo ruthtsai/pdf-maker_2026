@@ -25,6 +25,16 @@ def open_document(path: Path, password: str | None = None) -> fitz.Document:
     return _open(path, password)
 
 
+def _decode_label_prefix(prefix: str) -> str:
+    """PyMuPDF hands back hex text strings ("<FEFF...>") undecoded."""
+    if prefix.startswith("<") and prefix.endswith(">"):
+        try:
+            return bytes.fromhex(prefix[1:-1]).decode("utf-16")
+        except (ValueError, UnicodeError):
+            return prefix
+    return prefix
+
+
 def inspect_document(path: Path, password: str | None = None) -> dict:
     """Per-page visual size (after the page's own /Rotate), bookmarks, and page labels."""
     doc = _open(path, password)
@@ -34,7 +44,9 @@ def inspect_document(path: Path, password: str | None = None) -> dict:
             for p in doc
         ]
         toc = [{"level": lvl, "title": title, "page": page} for lvl, title, page, *_ in doc.get_toc(simple=True)]
-        labels = doc.get_page_labels() or []
+        labels = [
+            {**rule, "prefix": _decode_label_prefix(rule.get("prefix", ""))} for rule in (doc.get_page_labels() or [])
+        ]
         return {"pages": pages, "toc": toc, "labels": labels}
     finally:
         doc.close()

@@ -7,4 +7,5 @@ uvicorn[standard]>=0.29
 python-multipart>=0.0.9
 pytest>=8.0
 httpx>=0.27
+fonttools>=4.40
 pyinstaller>=6.0

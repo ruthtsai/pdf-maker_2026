@@ -9,6 +9,7 @@ from typing import Callable
 
 import pymupdf as fitz
 
+from core import overlay
 from core.file_utils import PdfEncryptedError
 
 ProgressCallback = Callable[[int, int, str], None]
@@ -35,9 +36,39 @@ class Source:
     password: str | None = None
 
 
+LABEL_STYLES = ("D", "r", "R", "a", "A", "")   # decimal, roman, ROMAN, alpha, ALPHA, none (prefix only)
+NUMBER_FORMATS = ("number", "roman", "roman_upper", "of")
+STAMP_GLYPHS = "0123456789 第頁共／"   # every character a number stamp can contain
+
+
+@dataclass
+class LabelRule:
+    """A PDF page-label range: viewers show these in their page box (i, ii, iii, 1, 2, ...)."""
+
+    start: int            # 0-based output page where this rule begins
+    style: str = "D"
+    prefix: str = ""
+    first: int = 1
+
+
+@dataclass
+class NumberStamp:
+    """Page numbers printed onto the pages."""
+
+    v_pos: str = "bottom"     # top | bottom
+    h_pos: str = "center"     # left | center | right
+    fmt: str = "number"
+    start_page: int = 1       # 1-based output page where numbering begins
+    start_number: int = 1
+    font_size: float = 10
+    margin: float = 28
+
+
 @dataclass
 class EditRecipe:
     pages: list[PageRef] = field(default_factory=list)
+    labels: list[LabelRule] = field(default_factory=list)
+    number_stamp: NumberStamp | None = None
 
 
 def _open_source(src: Source) -> fitz.Document:
@@ -61,6 +92,25 @@ def validate_recipe(recipe: EditRecipe, page_counts: dict[str, int]) -> None:
             raise RecipeError(f"第 {n} 頁指向不存在的來源頁碼")
         if ref.rot not in VALID_ROTATIONS:
             raise RecipeError(f"第 {n} 頁的旋轉角度無效")
+
+    total = len(recipe.pages)
+    for rule in recipe.labels:
+        if rule.style not in LABEL_STYLES:
+            raise RecipeError("頁碼標籤樣式無效")
+        if not 0 <= rule.start < total:
+            raise RecipeError(f"頁碼標籤的起始頁超出範圍（1-{total}）")
+        if rule.first < 1:
+            raise RecipeError("頁碼標籤的起始號碼需大於等於 1")
+    ns = recipe.number_stamp
+    if ns:
+        if ns.fmt not in NUMBER_FORMATS or ns.v_pos not in ("top", "bottom") or ns.h_pos not in ("left", "center", "right"):
+            raise RecipeError("蓋印頁碼的位置或格式無效")
+        if not 1 <= ns.start_page <= total:
+            raise RecipeError(f"蓋印頁碼的起始頁超出範圍（1-{total}）")
+        if ns.start_number < 0:
+            raise RecipeError("蓋印頁碼的起始號碼不可為負數")
+        if not 4 <= ns.font_size <= 72:
+            raise RecipeError("蓋印頁碼的字型大小需介於 4–72")
 
 
 def assemble_pages(docs: dict[str, fitz.Document], refs: list[PageRef]) -> fitz.Document:
@@ -87,6 +137,80 @@ def assemble_pages(docs: dict[str, fitz.Document], refs: list[PageRef]) -> fitz.
     return out
 
 
+def to_roman(n: int) -> str:
+    if n <= 0:
+        return str(n)
+    out = []
+    for value, sym in ((1000, "M"), (900, "CM"), (500, "D"), (400, "CD"), (100, "C"), (90, "XC"),
+                       (50, "L"), (40, "XL"), (10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I")):
+        while n >= value:
+            out.append(sym)
+            n -= value
+    return "".join(out)
+
+
+def format_page_number(fmt: str, n: int, last: int) -> str:
+    if fmt == "roman":
+        return to_roman(n).lower()
+    if fmt == "roman_upper":
+        return to_roman(n)
+    if fmt == "of":
+        return f"第 {n} 頁／共 {last} 頁"
+    return str(n)
+
+
+def stamp_page_number(page: fitz.Page, cfg: NumberStamp, out_index: int, total: int) -> None:
+    """`out_index` is the page's 0-based position in the final document."""
+    if out_index + 1 < cfg.start_page:
+        return
+    n = cfg.start_number + (out_index + 1 - cfg.start_page)
+    last = cfg.start_number + (total - cfg.start_page)
+    text = format_page_number(cfg.fmt, n, last)
+    font = overlay.cjk_font(STAMP_GLYPHS) if cfg.fmt == "of" else None
+    with overlay.visual_frame(page) as canvas:
+        if font is None:
+            width = fitz.get_text_length(text, fontname="helv", fontsize=cfg.font_size)
+        else:
+            width = font.text_length(text, fontsize=cfg.font_size)
+        x = {"left": cfg.margin, "center": (canvas.width - width) / 2, "right": canvas.width - cfg.margin - width}[cfg.h_pos]
+        y = cfg.margin + cfg.font_size if cfg.v_pos == "top" else canvas.height - cfg.margin
+        canvas.text(max(0.0, x), y, text, cfg.font_size, font)
+
+
+def apply_overlays(doc: fitz.Document, recipe: EditRecipe, indexes: list[int], total: int) -> None:
+    """Draws overlays on every page of `doc`; indexes[i] is page i's position in the final document."""
+    if recipe.number_stamp:
+        for i, page in enumerate(doc):
+            stamp_page_number(page, recipe.number_stamp, indexes[i], total)
+
+
+def _pdf_text_string(text: str) -> str:
+    """PDF text string literal; non-ASCII text must be UTF-16BE with a BOM or viewers show mojibake."""
+    if text.isascii():
+        escaped = text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+        return f"({escaped})"
+    return "<FEFF" + text.encode("utf-16-be").hex().upper() + ">"
+
+
+def apply_labels(doc: fitz.Document, labels: list[LabelRule]) -> None:
+    if not labels:
+        return
+    rules = sorted(labels, key=lambda r: r.start)
+    if rules[0].start != 0:
+        rules.insert(0, LabelRule(start=0, style="D", prefix="", first=1))
+    entries = []
+    for r in rules:
+        parts = []
+        if r.style:
+            parts.append(f"/S /{r.style}")
+        if r.prefix:
+            parts.append(f"/P {_pdf_text_string(r.prefix)}")
+        if r.first != 1:
+            parts.append(f"/St {r.first}")
+        entries.append(f"{r.start} <<{' '.join(parts)}>>")
+    doc.xref_set_key(doc.pdf_catalog(), "PageLabels", f"<</Nums [{' '.join(entries)}]>>")
+
+
 def build_document(
     recipe: EditRecipe,
     sources: dict[str, Source],
@@ -110,6 +234,8 @@ def build_document(
         step(len(used), total_steps, "組合頁面")
         out = assemble_pages(docs, recipe.pages)
         step(len(used) + 1, total_steps, "套用設定")
+        apply_overlays(out, recipe, list(range(out.page_count)), out.page_count)
+        apply_labels(out, recipe.labels)
         return out
     finally:
         for d in docs.values():
@@ -132,3 +258,24 @@ def export_pdf(
     finally:
         out.close()
     return output_path
+
+
+def render_preview(recipe: EditRecipe, sources: dict[str, Source], out_index: int, width: int) -> bytes:
+    """Renders one output page (rotation + overlays applied) as PNG without building the whole document."""
+    ref = recipe.pages[out_index]
+    src = _open_source(sources[ref.src])
+    try:
+        doc = fitz.open()
+        doc.insert_pdf(src, from_page=ref.idx, to_page=ref.idx)
+    finally:
+        src.close()
+    try:
+        if ref.rot:
+            doc[0].set_rotation((doc[0].rotation + ref.rot) % 360)
+        apply_overlays(doc, recipe, [out_index], len(recipe.pages))
+        page = doc[0]
+        zoom = max(0.1, width / page.rect.width)
+        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), colorspace=fitz.csRGB, alpha=False)
+        return pix.tobytes("png")
+    finally:
+        doc.close()

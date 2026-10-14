@@ -132,3 +132,49 @@ def test_encrypted_pdf_blocked_until_unlocked(client, tmp_path):
     out = tmp_path / "dl.pdf"
     out.write_bytes(client.get(job["download_url"]).content)
     assert page_texts(out) == ["S2"]
+
+
+def test_export_with_page_numbers_and_labels(client, tmp_path):
+    import pypdf
+
+    a = upload(client, make_pdf(tmp_path / "a.pdf", ["A1", "A2", "A3", "A4"]))
+    pages = [{"src": a["id"], "idx": i} for i in range(4)]
+    r = client.post(
+        "/api/edit/export",
+        json={
+            "pages": pages,
+            "output_name": "numbered.pdf",
+            "page_labels": [{"start": 0, "style": "r"}, {"start": 2, "style": "D", "first": 1}],
+            "page_numbers": {"fmt": "of", "start_page": 3, "start_number": 1, "v_pos": "top", "h_pos": "right"},
+        },
+    )
+    assert r.status_code == 200, r.text
+    job = run_job(client, r.json()["job_id"])
+    assert job["status"] == "done", job
+    out = tmp_path / "dl.pdf"
+    out.write_bytes(client.get(job["download_url"]).content)
+
+    assert pypdf.PdfReader(str(out)).page_labels == ["i", "ii", "1", "2"]
+    with fitz.open(out) as d:
+        assert "第" not in d[1].get_text()
+        assert "第 1 頁／共 2 頁" in d[2].get_text()
+        assert "第 2 頁／共 2 頁" in d[3].get_text()
+
+
+def test_preview_endpoint(client, tmp_path):
+    a = upload(client, make_pdf(tmp_path / "a.pdf", ["A1", "A2"]))
+    pages = [{"src": a["id"], "idx": 0}, {"src": a["id"], "idx": 1, "rot": 90}]
+
+    plain = client.post("/api/edit/preview?index=1&w=400", json={"pages": pages})
+    assert plain.status_code == 200 and plain.headers["content-type"] == "image/png"
+    pix = fitz.Pixmap(plain.content)
+    assert pix.width == 400 and pix.width > pix.height          # rotated page is landscape
+
+    stamped = client.post(
+        "/api/edit/preview?index=1&w=400", json={"pages": pages, "page_numbers": {"fmt": "number", "font_size": 20}}
+    )
+    assert stamped.status_code == 200 and stamped.content != plain.content
+
+    assert client.post("/api/edit/preview?index=5", json={"pages": pages}).status_code == 404
+    bad = client.post("/api/edit/preview?index=0", json={"pages": pages, "page_numbers": {"fmt": "nope"}})
+    assert bad.status_code == 400

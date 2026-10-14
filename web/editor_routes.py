@@ -26,9 +26,28 @@ class EditPage(BaseModel):
     rot: int = 0
 
 
+class LabelRuleIn(BaseModel):
+    start: int = Field(ge=0)
+    style: str = "D"
+    prefix: str = ""
+    first: int = 1
+
+
+class NumberStampIn(BaseModel):
+    v_pos: str = "bottom"
+    h_pos: str = "center"
+    fmt: str = "number"
+    start_page: int = 1
+    start_number: int = 1
+    font_size: float = 10
+    margin: float = 28
+
+
 class EditExport(BaseModel):
     pages: list[EditPage]
     output_name: str = "edited.pdf"
+    page_labels: list[LabelRuleIn] = []
+    page_numbers: NumberStampIn | None = None
 
 
 # ---------- helpers ----------
@@ -59,7 +78,11 @@ def _recipe_from_request(body: EditExport) -> tuple[editor.EditRecipe, dict[str,
         )
         page_counts[page.src] = item.page_count
 
-    recipe = editor.EditRecipe(pages=[editor.PageRef(p.src, p.idx, p.rot) for p in body.pages])
+    recipe = editor.EditRecipe(
+        pages=[editor.PageRef(p.src, p.idx, p.rot) for p in body.pages],
+        labels=[editor.LabelRule(r.start, r.style, r.prefix, r.first) for r in body.page_labels],
+        number_stamp=editor.NumberStamp(**body.page_numbers.model_dump()) if body.page_numbers else None,
+    )
     try:
         editor.validate_recipe(recipe, page_counts)
     except editor.RecipeError as exc:
@@ -127,3 +150,16 @@ def export_edit(body: EditExport):
 
     job_manager.run(job, task)
     return {"job_id": job.id, "page_count": len(recipe.pages)}
+
+
+@router.post("/api/edit/preview")
+def preview_edit_page(body: EditExport, index: int = Query(0, ge=0), w: int = Query(700, ge=100, le=1600)):
+    """Renders one output page exactly as the export would (rotation, page numbers, ...)."""
+    recipe, sources = _recipe_from_request(body)
+    if index >= len(recipe.pages):
+        raise HTTPException(404, detail="頁面不存在")
+    try:
+        png = editor.render_preview(recipe, sources, index, w)
+    except PdfEncryptedError as exc:
+        raise HTTPException(403, detail=str(exc))
+    return Response(content=png, media_type="image/png", headers={"Cache-Control": "no-store"})
