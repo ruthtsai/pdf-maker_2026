@@ -178,3 +178,54 @@ def test_preview_endpoint(client, tmp_path):
     assert client.post("/api/edit/preview?index=5", json={"pages": pages}).status_code == 404
     bad = client.post("/api/edit/preview?index=0", json={"pages": pages, "page_numbers": {"fmt": "nope"}})
     assert bad.status_code == 400
+
+
+def _upload_png(client, tmp_path, name="stamp.png", color=(255, 0, 0, 255)):
+    from PIL import Image
+
+    path = tmp_path / name
+    Image.new("RGBA", (80, 40), color).save(path)
+    with open(path, "rb") as f:
+        r = client.post("/api/upload", files={"file": (name, f, "image/png")})
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_stamp_via_api_and_raw_image_endpoint(client, tmp_path):
+    a = upload(client, make_pdf(tmp_path / "a.pdf", ["A1", "A2"]))
+    stamp = _upload_png(client, tmp_path)
+
+    raw = client.get(f"/api/files/{stamp['id']}/raw")
+    assert raw.status_code == 200 and raw.content[:4] == b"\x89PNG"
+    assert client.get(f"/api/files/{a['id']}/raw").status_code == 400      # a PDF is not an image
+
+    body = {
+        "pages": [{"src": a["id"], "idx": 0}, {"src": a["id"], "idx": 1}],
+        "stamps": [{"file_id": stamp["id"], "cx": 0.5, "cy": 0.5, "w": 0.3, "pages": [1], "name": "red"}],
+    }
+    r = client.post("/api/edit/export", json={**body, "output_name": "stamped.pdf"})
+    assert r.status_code == 200, r.text
+    job = run_job(client, r.json()["job_id"])
+    assert job["status"] == "done", job
+    out = tmp_path / "dl.pdf"
+    out.write_bytes(client.get(job["download_url"]).content)
+    with fitz.open(out) as d:
+        assert len(d[0].get_images()) == 0
+        assert len(d[1].get_images()) == 1
+
+    prev = client.post("/api/edit/preview?index=1&w=300", json=body)
+    assert prev.status_code == 200 and prev.content[:4] == b"\x89PNG"
+
+
+def test_stamp_requires_an_image_file(client, tmp_path):
+    a = upload(client, make_pdf(tmp_path / "a.pdf", ["A1"]))
+    r = client.post(
+        "/api/edit/export",
+        json={"pages": [{"src": a["id"], "idx": 0}], "stamps": [{"file_id": a["id"]}]},
+    )
+    assert r.status_code == 400
+    r = client.post(
+        "/api/edit/export",
+        json={"pages": [{"src": a["id"], "idx": 0}], "stamps": [{"file_id": "ghost"}]},
+    )
+    assert r.status_code == 404

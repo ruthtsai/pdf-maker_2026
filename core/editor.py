@@ -65,6 +65,22 @@ class NumberStamp:
 
 
 @dataclass
+class StampSpec:
+    """An image stamp (seal / signature). Geometry is relative to the page's visual frame:
+    (cx, cy) is the centre as a fraction of page width/height and `w` the un-rotated width as a
+    fraction of page width, so one placement fits pages of different sizes."""
+
+    image_path: Path
+    cx: float = 0.5
+    cy: float = 0.5
+    w: float = 0.25
+    rot: float = 0.0          # clockwise degrees
+    opacity: float = 1.0
+    pages: list[int] | None = None   # 0-based output pages; None = every page
+    name: str = ""
+
+
+@dataclass
 class Bookmark:
     level: int      # 1 = top level
     title: str
@@ -77,6 +93,7 @@ class EditRecipe:
     labels: list[LabelRule] = field(default_factory=list)
     number_stamp: NumberStamp | None = None
     bookmarks: list[Bookmark] | None = None   # None: write no outline; []: explicitly empty
+    stamps: list[StampSpec] = field(default_factory=list)
 
 
 def _open_source(src: Source) -> fitz.Document:
@@ -119,6 +136,18 @@ def validate_recipe(recipe: EditRecipe, page_counts: dict[str, int]) -> None:
             raise RecipeError("蓋印頁碼的起始號碼不可為負數")
         if not 4 <= ns.font_size <= 72:
             raise RecipeError("蓋印頁碼的字型大小需介於 4–72")
+    for st in recipe.stamps:
+        label = st.name or st.image_path.name
+        if not st.image_path.exists():
+            raise RecipeError(f"章「{label}」的圖片已不存在")
+        if not 0.01 <= st.w <= 3:
+            raise RecipeError(f"章「{label}」的大小無效")
+        if not (-0.5 <= st.cx <= 1.5 and -0.5 <= st.cy <= 1.5):
+            raise RecipeError(f"章「{label}」的位置超出頁面太多")
+        if not 0 <= st.opacity <= 1:
+            raise RecipeError(f"章「{label}」的透明度需介於 0–1")
+        if st.pages is not None and any(not 0 <= i < total for i in st.pages):
+            raise RecipeError(f"章「{label}」指定的頁面不存在")
     for b in recipe.bookmarks or []:
         if b.level < 1:
             raise RecipeError("書籤層級需大於等於 1")
@@ -172,7 +201,7 @@ def format_page_number(fmt: str, n: int, last: int) -> str:
     return str(n)
 
 
-def stamp_page_number(page: fitz.Page, cfg: NumberStamp, out_index: int, total: int) -> None:
+def _draw_number(canvas, cfg: NumberStamp, out_index: int, total: int) -> None:
     """`out_index` is the page's 0-based position in the final document."""
     if out_index + 1 < cfg.start_page:
         return
@@ -180,21 +209,34 @@ def stamp_page_number(page: fitz.Page, cfg: NumberStamp, out_index: int, total: 
     last = cfg.start_number + (total - cfg.start_page)
     text = format_page_number(cfg.fmt, n, last)
     font = overlay.cjk_font(STAMP_GLYPHS) if cfg.fmt == "of" else None
-    with overlay.visual_frame(page) as canvas:
-        if font is None:
-            width = fitz.get_text_length(text, fontname="helv", fontsize=cfg.font_size)
-        else:
-            width = font.text_length(text, fontsize=cfg.font_size)
-        x = {"left": cfg.margin, "center": (canvas.width - width) / 2, "right": canvas.width - cfg.margin - width}[cfg.h_pos]
-        y = cfg.margin + cfg.font_size if cfg.v_pos == "top" else canvas.height - cfg.margin
-        canvas.text(max(0.0, x), y, text, cfg.font_size, font)
+    if font is None:
+        width = fitz.get_text_length(text, fontname="helv", fontsize=cfg.font_size)
+    else:
+        width = font.text_length(text, fontsize=cfg.font_size)
+    x = {"left": cfg.margin, "center": (canvas.width - width) / 2, "right": canvas.width - cfg.margin - width}[cfg.h_pos]
+    y = cfg.margin + cfg.font_size if cfg.v_pos == "top" else canvas.height - cfg.margin
+    canvas.text(max(0.0, x), y, text, cfg.font_size, font)
+
+
+def _draw_stamp(canvas, spec: StampSpec) -> None:
+    png, bw, bh = overlay.stamp_png_for(spec.image_path, spec.w * canvas.width, spec.rot, spec.opacity)
+    cx, cy = spec.cx * canvas.width, spec.cy * canvas.height
+    canvas.image(fitz.Rect(cx - bw / 2, cy - bh / 2, cx + bw / 2, cy + bh / 2), png)
 
 
 def apply_overlays(doc: fitz.Document, recipe: EditRecipe, indexes: list[int], total: int) -> None:
-    """Draws overlays on every page of `doc`; indexes[i] is page i's position in the final document."""
-    if recipe.number_stamp:
-        for i, page in enumerate(doc):
-            stamp_page_number(page, recipe.number_stamp, indexes[i], total)
+    """Draws page numbers and stamps on every page of `doc`; indexes[i] is page i's position in
+    the final document."""
+    if not recipe.number_stamp and not recipe.stamps:
+        return
+    for i, page in enumerate(doc):
+        at = indexes[i]
+        with overlay.visual_frame(page) as canvas:
+            if recipe.number_stamp:
+                _draw_number(canvas, recipe.number_stamp, at, total)
+            for spec in recipe.stamps:
+                if spec.pages is None or at in spec.pages:
+                    _draw_stamp(canvas, spec)
 
 
 def _pdf_text_string(text: str) -> str:

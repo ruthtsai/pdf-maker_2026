@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Response
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from core import editor, file_utils, render
@@ -49,12 +50,24 @@ class BookmarkIn(BaseModel):
     page: int = -1
 
 
+class StampIn(BaseModel):
+    file_id: str
+    cx: float = 0.5
+    cy: float = 0.5
+    w: float = 0.25
+    rot: float = 0.0
+    opacity: float = 1.0
+    pages: list[int] | None = None
+    name: str = ""
+
+
 class EditExport(BaseModel):
     pages: list[EditPage]
     output_name: str = "edited.pdf"
     page_labels: list[LabelRuleIn] = []
     page_numbers: NumberStampIn | None = None
     bookmarks: list[BookmarkIn] | None = None
+    stamps: list[StampIn] = []
 
 
 # ---------- helpers ----------
@@ -70,6 +83,15 @@ def _pdf_item(file_id: str) -> FileItem:
         raise HTTPException(403, detail="PDF 有密碼保護，請先輸入密碼")
     if item.status == FileStatus.ERROR:
         raise HTTPException(400, detail=item.error_message or "檔案無法開啟")
+    return item
+
+
+def _image_item(file_id: str) -> FileItem:
+    item = store.get(file_id)
+    if not item:
+        raise HTTPException(404, detail="找不到圖片檔案（可能已閒置過久被清除，請重新上傳）")
+    if item.file_type != FileType.IMAGE or item.status != FileStatus.OK:
+        raise HTTPException(400, detail=f"「{item.original_name}」不是可用的圖片")
     return item
 
 
@@ -92,6 +114,19 @@ def _recipe_from_request(body: EditExport) -> tuple[editor.EditRecipe, dict[str,
         bookmarks=None
         if body.bookmarks is None
         else [editor.Bookmark(b.level, b.title, b.page) for b in body.bookmarks],
+        stamps=[
+            editor.StampSpec(
+                image_path=Path(_image_item(st.file_id).stored_path),
+                cx=st.cx,
+                cy=st.cy,
+                w=st.w,
+                rot=st.rot,
+                opacity=st.opacity,
+                pages=st.pages,
+                name=st.name,
+            )
+            for st in body.stamps
+        ],
     )
     try:
         editor.validate_recipe(recipe, page_counts)
@@ -110,6 +145,13 @@ def document_info(file_id: str):
         return render.inspect_document(Path(item.stored_path), store.passwords.get(file_id))
     except PdfEncryptedError as exc:
         raise HTTPException(403, detail=str(exc))
+
+
+@router.get("/api/files/{file_id}/raw")
+def raw_image(file_id: str):
+    """The uploaded image itself (used to show a stamp at full quality while placing it)."""
+    item = _image_item(file_id)
+    return FileResponse(item.stored_path, headers={"Cache-Control": "private, max-age=3600"})
 
 
 @router.get("/api/files/{file_id}/pages/{page_index}/image")

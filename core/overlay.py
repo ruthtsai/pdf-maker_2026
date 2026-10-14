@@ -9,9 +9,13 @@ pixel-for-pixel against an upright reference for every rotation with and without
 
 from __future__ import annotations
 
+import io
 from contextlib import contextmanager
+from functools import lru_cache
+from pathlib import Path
 
 import pymupdf as fitz
+from PIL import Image
 
 _subset_cache: dict[str, fitz.Font] = {}
 
@@ -85,3 +89,42 @@ class _Canvas:
     def image(self, rect: fitz.Rect, png_bytes: bytes) -> None:
         target = _rect_to_media(self.rot, self.crop, self.width, self.height, rect)
         self.page.insert_image(target, stream=png_bytes, rotate=self.rot)
+
+
+@lru_cache(maxsize=64)
+def _load_stamp_image(path: str, mtime: float) -> Image.Image:
+    with Image.open(path) as img:
+        return img.convert("RGBA")
+
+
+@lru_cache(maxsize=128)
+def render_stamp_png(path: str, mtime: float, width_pt: float, rot: float, opacity: float) -> tuple[bytes, float, float]:
+    """The stamp image scaled so its un-rotated width is `width_pt` points, rotated clockwise by
+    `rot` degrees on a transparent canvas, with its alpha multiplied by `opacity`.
+    Returns (png bytes, bounding width pt, bounding height pt)."""
+    img = _load_stamp_image(path, mtime)
+    iw, ih = img.size
+    pt_per_px = width_pt / iw
+
+    # No point embedding far more pixels than will ever be shown (~4 px per point).
+    limit = max(64, int(width_pt * 4))
+    if iw > limit:
+        k = limit / iw
+        img = img.resize((limit, max(1, round(ih * k))), Image.LANCZOS)
+        pt_per_px = width_pt / img.width
+
+    if opacity < 1.0:
+        img = img.copy()
+        alpha = img.getchannel("A").point(lambda a: int(a * opacity))
+        img.putalpha(alpha)
+    if rot % 360:
+        img = img.rotate(-rot, expand=True, resample=Image.BICUBIC)
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    return buf.getvalue(), img.width * pt_per_px, img.height * pt_per_px
+
+
+def stamp_png_for(path: Path, width_pt: float, rot: float, opacity: float) -> tuple[bytes, float, float]:
+    # Width is rounded so pages of (nearly) equal size share one rendered image.
+    return render_stamp_png(str(path), path.stat().st_mtime, round(width_pt, 1), round(rot, 2), round(opacity, 3))

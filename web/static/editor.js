@@ -14,6 +14,7 @@ const ed = {
   labels: [], // page-label rules [{start (0-based), style, prefix, first}]
   bookmarks: [], // outline entries [{id, level, title, target (page uid | null)}]
   nextBookmarkId: 1,
+  stamps: [], // image stamps [{id, file, name, cx, cy, w, rot, opacity, scope:{mode:"all"}|{mode:"pages",uids}}]
   numbering: null, // printed page numbers {v_pos,h_pos,fmt,start_page,start_number,font_size,margin} | null
   selection: new Set(), // uids
   anchor: null, // uid used as the start of a Shift range
@@ -145,7 +146,13 @@ function edSelectedPositions() {
 // ---------- history (undo / redo) ----------
 
 function edSnapshot() {
-  return JSON.stringify({ pages: ed.pages, labels: ed.labels, numbering: ed.numbering, bookmarks: ed.bookmarks });
+  return JSON.stringify({
+    pages: ed.pages,
+    labels: ed.labels,
+    numbering: ed.numbering,
+    bookmarks: ed.bookmarks,
+    stamps: ed.stamps,
+  });
 }
 
 function edUpdateHistoryButtons() {
@@ -177,6 +184,7 @@ function edGoto(index) {
   ed.labels = snap.labels;
   ed.numbering = snap.numbering;
   ed.bookmarks = snap.bookmarks;
+  ed.stamps = snap.stamps || [];
   const alive = new Set(ed.pages.map((p) => p.uid));
   ed.selection = new Set([...ed.selection].filter((u) => alive.has(u)));
   edUpdateHistoryButtons();
@@ -251,6 +259,7 @@ async function edStartSession(item) {
     first: l.firstpagenum || 1,
   }));
   ed.numbering = null;
+  ed.stamps = [];
   ed.nextBookmarkId = 1;
   ed.bookmarks = (info.toc || []).map((t) => ({
     id: ed.nextBookmarkId++,
@@ -1164,6 +1173,396 @@ function edOpenBookmarkDialog() {
   });
 }
 
+// ---------- image stamps ----------
+
+function edOpenStampDialog() {
+  const total = ed.pages.length;
+  let stamps = ed.stamps.map((st) => ({ ...st, scope: { ...st.scope, uids: [...(st.scope.uids || [])] } }));
+  let nextId = Math.max(0, ...stamps.map((st) => st.id)) + 1;
+  let selectedId = stamps.length ? stamps[0].id : null;
+  let cur = ed.selection.size ? Math.max(0, edPositionOf([...ed.selection][0])) : 0;
+  const uploaded = [];
+  let objectUrl = null;
+  let loadToken = 0;
+  const err = h("div", { class: "dialog-error" });
+
+  const selected = () => stamps.find((st) => st.id === selectedId) || null;
+  const appliesTo = (st, pageIndex) => st.scope.mode === "all" || st.scope.uids.includes(ed.pages[pageIndex].uid);
+
+  // ----- stage: the page with draggable stamps on top -----
+  const pageImg = h("img", { class: "stamp-page", alt: "" });
+  const stage = h("div", { class: "stamp-stage" }, pageImg);
+  const stageWrap = h("div", { class: "stamp-stage-wrap" }, stage);
+  const curInput = h("input", { type: "number", min: "1", max: String(total), value: String(cur + 1) });
+  const MAX_W = 520;
+  const MAX_H = 560;
+
+  function fitStage() {
+    const size = edPageSize(ed.pages[cur]);
+    const vis = ed.pages[cur].rot % 180 !== 0 ? { w: size.h, h: size.w } : size;
+    const k = Math.min(MAX_W / vis.w, MAX_H / vis.h);
+    stage.style.width = `${vis.w * k}px`;
+    stage.style.height = `${vis.h * k}px`;
+  }
+
+  async function loadPage() {
+    const mine = ++loadToken;
+    fitStage();
+    try {
+      const res = await fetch(`${API}/edit/preview?index=${cur}&w=900`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(edRecipe("preview.pdf", { page_labels: [], stamps: [] })),
+      });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText);
+      const url = URL.createObjectURL(await res.blob());
+      if (mine !== loadToken) return URL.revokeObjectURL(url);
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      objectUrl = url;
+      pageImg.src = url;
+    } catch (e) {
+      err.textContent = `頁面預覽失敗：${e.message}`;
+    }
+    drawStamps();
+  }
+
+  function goto(n) {
+    cur = Math.min(Math.max(n, 0), total - 1);
+    curInput.value = String(cur + 1);
+    loadPage();
+    renderControls();
+  }
+
+  // ----- drawing + interaction -----
+  function drawStamps() {
+    stage.querySelectorAll(".stamp-box").forEach((el) => el.remove());
+    const rect = () => stage.getBoundingClientRect();
+    for (const st of stamps) {
+      if (!appliesTo(st, cur)) continue;
+      const active = st.id === selectedId;
+      const img = h("img", { src: `${API}/files/${st.file}/raw`, alt: st.name, draggable: "false" });
+      const box = h("div", { class: "stamp-box" + (active ? " active" : "") }, img);
+      box.style.left = `${st.cx * 100}%`;
+      box.style.top = `${st.cy * 100}%`;
+      box.style.width = `${st.w * 100}%`;
+      box.style.opacity = String(st.opacity);
+      box.style.transform = `translate(-50%, -50%) rotate(${st.rot}deg)`;
+      box.addEventListener("pointerdown", (e) => {
+        if (!active) {
+          selectedId = st.id;
+          drawStamps();
+          renderControls();
+          return;
+        }
+        e.preventDefault();
+        const start = { x: e.clientX, y: e.clientY, cx: st.cx, cy: st.cy };
+        trackPointer((ev) => {
+          const r = rect();
+          st.cx = Math.min(1.5, Math.max(-0.5, start.cx + (ev.clientX - start.x) / r.width));
+          st.cy = Math.min(1.5, Math.max(-0.5, start.cy + (ev.clientY - start.y) / r.height));
+          box.style.left = `${st.cx * 100}%`;
+          box.style.top = `${st.cy * 100}%`;
+        });
+      });
+      if (active) {
+        const resize = h("span", { class: "stamp-handle resize-h", title: "拖曳縮放" });
+        const rotate = h("span", { class: "stamp-handle rotate-h", title: "拖曳旋轉" });
+        resize.addEventListener("pointerdown", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const r = rect();
+          const rad = (st.rot * Math.PI) / 180;
+          const start = { x: e.clientX, y: e.clientY, wpx: st.w * r.width };
+          trackPointer((ev) => {
+            const dx = ev.clientX - start.x;
+            const dy = ev.clientY - start.y;
+            const local = dx * Math.cos(rad) + dy * Math.sin(rad); // movement along the stamp's own x axis
+            st.w = Math.min(3, Math.max(0.02, (start.wpx + 2 * local) / r.width));
+            box.style.width = `${st.w * 100}%`;
+            syncSliders();
+          });
+        });
+        rotate.addEventListener("pointerdown", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          trackPointer((ev) => {
+            const r = rect();
+            const centerX = r.left + st.cx * r.width;
+            const centerY = r.top + st.cy * r.height;
+            let deg = (Math.atan2(ev.clientY - centerY, ev.clientX - centerX) * 180) / Math.PI + 90;
+            deg = ((deg + 540) % 360) - 180; // -180..180
+            if (ev.shiftKey) deg = Math.round(deg / 15) * 15;
+            st.rot = Math.round(deg * 10) / 10;
+            box.style.transform = `translate(-50%, -50%) rotate(${st.rot}deg)`;
+            syncSliders();
+          });
+        });
+        box.append(resize, rotate);
+      }
+      stage.append(box);
+    }
+  }
+
+  function trackPointer(onMove) {
+    const move = (ev) => onMove(ev);
+    const up = () => {
+      document.removeEventListener("pointermove", move);
+      document.removeEventListener("pointerup", up);
+    };
+    document.addEventListener("pointermove", move);
+    document.addEventListener("pointerup", up);
+  }
+
+  // ----- side panel -----
+  const stampList = h("div", { class: "stamp-list" });
+  const controls = h("div", { class: "stamp-controls" });
+  let sizeInput, rotInput, opacityInput;
+
+  function syncSliders() {
+    const st = selected();
+    if (!st || !sizeInput) return;
+    sizeInput.value = String(Math.round(st.w * 100));
+    rotInput.value = String(Math.round(st.rot));
+    opacityInput.value = String(Math.round(st.opacity * 100));
+  }
+
+  function renderList() {
+    stampList.innerHTML = "";
+    if (!stamps.length) stampList.append(h("div", { class: "picker-info" }, "尚未加入任何章。請先上傳圖片（建議使用透明背景的 PNG）。"));
+    for (const st of stamps) {
+      stampList.append(
+        h(
+          "div",
+          {
+            class: "stamp-item" + (st.id === selectedId ? " active" : ""),
+            onclick: () => {
+              selectedId = st.id;
+              renderList();
+              renderControls();
+              drawStamps();
+            },
+          },
+          h("img", { src: `${API}/files/${st.file}/raw`, alt: "" }),
+          h("span", { class: "stamp-name", title: st.name }, st.name),
+          h(
+            "button",
+            {
+              class: "btn-icon",
+              title: "移除這個章",
+              onclick: (e) => {
+                e.stopPropagation();
+                stamps = stamps.filter((x) => x.id !== st.id);
+                if (selectedId === st.id) selectedId = stamps.length ? stamps[0].id : null;
+                renderList();
+                renderControls();
+                drawStamps();
+              },
+            },
+            "✕"
+          )
+        )
+      );
+    }
+  }
+
+  function renderControls() {
+    controls.innerHTML = "";
+    const st = selected();
+    if (!st) {
+      sizeInput = rotInput = opacityInput = null;
+      return;
+    }
+    sizeInput = h("input", { type: "range", min: "2", max: "100", value: String(Math.round(st.w * 100)) });
+    sizeInput.addEventListener("input", () => {
+      st.w = Number(sizeInput.value) / 100;
+      drawStamps();
+    });
+    rotInput = h("input", { type: "number", min: "-180", max: "180", value: String(Math.round(st.rot)) });
+    rotInput.addEventListener("input", () => {
+      st.rot = Math.max(-360, Math.min(360, Number(rotInput.value) || 0));
+      drawStamps();
+    });
+    opacityInput = h("input", { type: "range", min: "10", max: "100", value: String(Math.round(st.opacity * 100)) });
+    opacityInput.addEventListener("input", () => {
+      st.opacity = Number(opacityInput.value) / 100;
+      drawStamps();
+    });
+
+    const rangeInput = h("input", {
+      type: "text",
+      placeholder: "例如 1-3,5",
+      value: st.scope.mode === "pages" ? edCompactRange(st.scope.uids.map((u) => edPositionOf(u) + 1).filter((n) => n > 0).sort((a, b) => a - b)) : "",
+    });
+    const radio = (value, label, extra) =>
+      h(
+        "label",
+        { class: "scope-row" },
+        h("input", {
+          type: "radio",
+          name: "stamp-scope",
+          value,
+          checked: scopeKind(st) === value,
+          onchange: () => setScope(value),
+        }),
+        label,
+        extra
+      );
+    const scopeKind = (x) => {
+      if (x.scope.mode === "all") return "all";
+      return x.scope.custom ? "range" : "current";
+    };
+    function setScope(kind) {
+      err.textContent = "";
+      if (kind === "all") st.scope = { mode: "all" };
+      else if (kind === "current") st.scope = { mode: "pages", uids: [ed.pages[cur].uid] };
+      else {
+        const nums = rangeInput.value.trim() ? safeRange(rangeInput.value) : [cur + 1];
+        st.scope = { mode: "pages", custom: true, uids: nums.map((n) => ed.pages[n - 1].uid) };
+        if (!rangeInput.value.trim()) rangeInput.value = edCompactRange(nums);
+      }
+      drawStamps();
+    }
+    function safeRange(text) {
+      try {
+        return edParseRange(text, total, "頁碼");
+      } catch (e) {
+        err.textContent = e.message;
+        return [];
+      }
+    }
+    rangeInput.addEventListener("input", () => {
+      const nums = safeRange(rangeInput.value);
+      if (!nums.length) return;
+      err.textContent = "";
+      st.scope = { mode: "pages", custom: true, uids: nums.map((n) => ed.pages[n - 1].uid) };
+      controls.querySelector('input[value="range"]').checked = true;
+      drawStamps();
+    });
+
+    controls.append(
+      h("div", { class: "section-title" }, `調整：${st.name}`),
+      h("label", { class: "field" }, "大小（佔頁面寬度的百分比）", sizeInput),
+      h("label", { class: "field" }, "旋轉角度（度，順時針為正）", rotInput),
+      h("label", { class: "field" }, "透明度", opacityInput),
+      h("div", { class: "section-title" }, "套用範圍"),
+      radio("all", "全部頁面"),
+      radio("current", `只有目前預覽的頁面（第 ${cur + 1} 頁）`),
+      radio("range", "指定頁面：", rangeInput)
+    );
+  }
+
+  async function addStampFile(file) {
+    if (!file) return;
+    const lower = file.name.toLowerCase();
+    if (!(lower.endsWith(".png") || lower.endsWith(".jpg") || lower.endsWith(".jpeg"))) {
+      err.textContent = "請選擇 PNG 或 JPG 圖片";
+      return;
+    }
+    const form = new FormData();
+    form.append("file", file);
+    try {
+      const item = await apiFetch(`${API}/upload`, { method: "POST", body: form });
+      uploaded.push(item.id);
+      if (item.status !== "ok" || item.type !== "image") {
+        err.textContent = item.error_message || "無法使用這個檔案";
+        return;
+      }
+      err.textContent = "";
+      const st = {
+        id: nextId++,
+        file: item.id,
+        name: item.name,
+        cx: 0.5,
+        cy: 0.5,
+        w: 0.25,
+        rot: 0,
+        opacity: 1,
+        scope: { mode: "all" },
+      };
+      stamps.push(st);
+      selectedId = st.id;
+      renderList();
+      renderControls();
+      drawStamps();
+    } catch (e) {
+      err.textContent = `上傳失敗：${e.message}`;
+    }
+  }
+
+  const fileInput = h("input", { type: "file", accept: "image/png,image/jpeg" });
+  fileInput.addEventListener("change", () => {
+    addStampFile(fileInput.files[0]);
+    fileInput.value = "";
+  });
+  curInput.addEventListener("change", () => goto((Number(curInput.value) || 1) - 1));
+
+  const body = h(
+    "div",
+    { class: "stamp-layout" },
+    h(
+      "div",
+      { class: "stamp-side" },
+      h("label", { class: "field" }, "上傳章或簽名檔（PNG 透明背景最佳）", fileInput),
+      stampList,
+      controls,
+      err
+    ),
+    h(
+      "div",
+      { class: "stamp-main" },
+      h(
+        "div",
+        { class: "inline-row stamp-nav" },
+        h("button", { class: "btn", onclick: () => goto(cur - 1) }, "◀"),
+        "第",
+        curInput,
+        `/ ${total} 頁`,
+        h("button", { class: "btn", onclick: () => goto(cur + 1) }, "▶"),
+        h("span", { class: "picker-info" }, "拖曳章移動；拖曳右下角縮放；拖曳上方圓點旋轉（按住 Shift 以 15° 為單位）")
+      ),
+      stageWrap
+    )
+  );
+
+  const dialog = openModal({
+    title: "蓋章",
+    body,
+    actions: [
+      { label: "取消" },
+      {
+        label: "套用",
+        primary: true,
+        onClick: () => {
+          for (const st of stamps) {
+            if (st.scope.mode === "pages" && !st.scope.uids.length) {
+              err.textContent = `「${st.name}」沒有指定任何頁面`;
+              return true;
+            }
+          }
+          ed.stamps = stamps.map((st) => {
+            const { custom, ...scope } = st.scope;
+            return { ...st, scope };
+          });
+          edCommit();
+        },
+      },
+    ],
+    onClose: () => {
+      loadToken++;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      // images uploaded in this dialog that ended up unused are discarded again
+      uploaded.forEach((id) => {
+        if (ed.history.some((snap) => snap.includes(`"file":"${id}"`))) return;
+        apiFetch(`${API}/files/${id}`, { method: "DELETE" }).catch(() => {});
+      });
+    },
+  });
+  dialog.backdrop.querySelector(".modal").classList.add("wide");
+  renderList();
+  renderControls();
+  loadPage();
+}
+
 // ---------- single page preview ----------
 
 function edOpenPreview(startUid) {
@@ -1259,6 +1658,7 @@ function edSummary() {
     const fmt = ED_NUMBER_FORMATS.find((f) => f[0] === ed.numbering.fmt)[1];
     parts.push(`蓋印頁碼：${fmt}，從第 ${ed.numbering.start_page} 頁開始`);
   }
+  if (ed.stamps.length) parts.push(`蓋章：${ed.stamps.length} 個`);
   if (ed.labels.length) parts.push(`頁碼標籤：${ed.labels.length} 條規則`);
   if (ed.bookmarks.length) {
     const lost = edBookmarksForExport().filter((b) => b.page < 0).length;
@@ -1274,8 +1674,24 @@ function edRecipe(outputName, overrides = {}) {
     page_labels: ed.labels,
     page_numbers: ed.numbering,
     bookmarks: edBookmarksForExport(),
+    stamps: edStampsForExport(),
     ...overrides,
   };
+}
+
+// Stamps limited to chosen pages are stored by page identity; the server wants output positions.
+function edStampsForExport() {
+  const position = new Map(ed.pages.map((p, i) => [p.uid, i]));
+  const out = [];
+  for (const st of ed.stamps) {
+    let pages = null;
+    if (st.scope.mode === "pages") {
+      pages = st.scope.uids.filter((u) => position.has(u)).map((u) => position.get(u));
+      if (!pages.length) continue; // every page it was meant for is gone
+    }
+    out.push({ file_id: st.file, name: st.name, cx: st.cx, cy: st.cy, w: st.w, rot: st.rot, opacity: st.opacity, pages });
+  }
+  return out;
 }
 
 // Bookmark targets are stored as page identities so reordering follows them; the server
@@ -1289,7 +1705,7 @@ function edBookmarksForExport() {
   }));
 }
 
-const edHasOverlays = () => !!ed.numbering;
+const edHasOverlays = () => !!ed.numbering || ed.stamps.length > 0;
 
 function edOpenExportDialog() {
   const base = ed.sources[ed.baseId];
@@ -1370,6 +1786,7 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("edit-replace-btn").addEventListener("click", edOpenReplaceDialog);
   document.getElementById("edit-numbering-btn").addEventListener("click", edOpenNumberingDialog);
   document.getElementById("edit-bookmark-btn").addEventListener("click", edOpenBookmarkDialog);
+  document.getElementById("edit-stamp-btn").addEventListener("click", edOpenStampDialog);
   document.querySelectorAll("#edit-toolbar [data-rotate]").forEach((btn) => {
     btn.addEventListener("click", () => edRotate(Number(btn.dataset.rotate)));
   });
