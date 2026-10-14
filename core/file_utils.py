@@ -20,8 +20,10 @@ THUMBNAIL_MAX_SIZE = (160, 160)
 _TEMP_ROOT = Path(tempfile.mkdtemp(prefix="pdf_maker_"))
 _UPLOAD_DIR = _TEMP_ROOT / "uploads"
 _OUTPUT_DIR = _TEMP_ROOT / "outputs"
+_THUMB_DIR = _TEMP_ROOT / "thumbs"
 _UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+_THUMB_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _cleanup_temp_root() -> None:
@@ -37,6 +39,15 @@ def upload_dir() -> Path:
 
 def output_dir() -> Path:
     return _OUTPUT_DIR
+
+
+def thumb_dir() -> Path:
+    return _THUMB_DIR
+
+
+def remove_thumbs(file_id: str) -> None:
+    for p in _THUMB_DIR.glob(f"{file_id}_*"):
+        p.unlink(missing_ok=True)
 
 
 def is_allowed_extension(filename: str) -> bool:

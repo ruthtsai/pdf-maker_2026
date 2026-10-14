@@ -1,0 +1,134 @@
+import io
+import time
+
+import pymupdf as fitz
+import pytest
+from fastapi.testclient import TestClient
+
+from core import file_utils
+from tests.helpers import make_pdf, page_texts
+from web import store
+from web.server import app
+
+
+@pytest.fixture
+def client():
+    return TestClient(app)
+
+
+def upload(client, path, name=None):
+    with open(path, "rb") as f:
+        r = client.post("/api/upload", files={"file": (name or path.name, f, "application/pdf")})
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def run_job(client, job_id, timeout=20):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        job = client.get(f"/api/jobs/{job_id}").json()
+        if job["status"] in ("done", "error", "cancelled"):
+            return job
+        time.sleep(0.05)
+    raise AssertionError("job did not finish")
+
+
+def export(client, pages, name="edited.pdf"):
+    r = client.post("/api/edit/export", json={"pages": pages, "output_name": name})
+    assert r.status_code == 200, r.text
+    job = run_job(client, r.json()["job_id"])
+    return r.json(), job
+
+
+def test_info_and_image_endpoints(client, tmp_path):
+    item = upload(client, make_pdf(tmp_path / "a.pdf", ["A1", "A2"], size=(300, 400)))
+
+    info = client.get(f"/api/files/{item['id']}/info").json()
+    assert [(p["w"], p["h"]) for p in info["pages"]] == [(300, 400), (300, 400)]
+
+    r = client.get(f"/api/files/{item['id']}/pages/1/image?w=150")
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/jpeg"
+    pix = fitz.Pixmap(r.content)
+    assert (pix.width, pix.height) == (150, 200)
+
+    assert client.get(f"/api/files/{item['id']}/pages/9/image").status_code == 404
+    assert client.get("/api/files/nope/info").status_code == 404
+
+
+def test_image_is_cached_and_cleared_on_delete(client, tmp_path):
+    item = upload(client, make_pdf(tmp_path / "a.pdf", ["A1"]))
+    client.get(f"/api/files/{item['id']}/pages/0/image?w=120")
+    assert list(file_utils.thumb_dir().glob(f"{item['id']}_*"))
+    client.delete(f"/api/files/{item['id']}")
+    assert not list(file_utils.thumb_dir().glob(f"{item['id']}_*"))
+
+
+def test_export_reorder_and_rotate(client, tmp_path):
+    a = upload(client, make_pdf(tmp_path / "a.pdf", ["A1", "A2", "A3"]))
+    body, job = export(
+        client,
+        [{"src": a["id"], "idx": 2, "rot": 90}, {"src": a["id"], "idx": 0, "rot": 0}],
+    )
+    assert job["status"] == "done", job
+    assert body["page_count"] == 2
+    out = tmp_path / "dl.pdf"
+    out.write_bytes(client.get(job["download_url"]).content)
+    assert page_texts(out) == ["A3", "A1"]
+    with fitz.open(out) as d:
+        assert [p.rotation for p in d] == [90, 0]
+
+
+def test_export_across_two_sources(client, tmp_path):
+    a = upload(client, make_pdf(tmp_path / "a.pdf", ["A1", "A2"]))
+    b = upload(client, make_pdf(tmp_path / "b.pdf", ["B1"]))
+    _, job = export(
+        client,
+        [{"src": a["id"], "idx": 0}, {"src": b["id"], "idx": 0}, {"src": a["id"], "idx": 1}],
+    )
+    out = tmp_path / "dl.pdf"
+    out.write_bytes(client.get(job["download_url"]).content)
+    assert page_texts(out) == ["A1", "B1", "A2"]
+
+
+def test_export_validation_errors(client, tmp_path):
+    a = upload(client, make_pdf(tmp_path / "a.pdf", ["A1"]))
+    r = client.post("/api/edit/export", json={"pages": [{"src": a["id"], "idx": 5}]})
+    assert r.status_code == 400
+    r = client.post("/api/edit/export", json={"pages": [{"src": "ghost", "idx": 0}]})
+    assert r.status_code == 404
+    r = client.post("/api/edit/export", json={"pages": []})
+    assert r.status_code == 400
+
+
+def test_export_filename_is_sanitized(client, tmp_path):
+    a = upload(client, make_pdf(tmp_path / "a.pdf", ["A1"]))
+    _, job = export(client, [{"src": a["id"], "idx": 0}], name="../../evil.pdf")
+    assert job["status"] == "done"
+    assert ".." not in job["download_url"]
+    assert store.files  # sanity: store populated by uploads
+
+
+def test_encrypted_pdf_blocked_until_unlocked(client, tmp_path):
+    plain = make_pdf(tmp_path / "p.pdf", ["S1", "S2"])
+    enc = tmp_path / "enc.pdf"
+    with fitz.open(plain) as d:
+        d.save(str(enc), encryption=fitz.PDF_ENCRYPT_AES_256, user_pw="pw", owner_pw="pw")
+
+    item = upload(client, enc)
+    assert item["status"] == "encrypted"
+    assert client.get(f"/api/files/{item['id']}/info").status_code == 403
+    assert client.get(f"/api/files/{item['id']}/pages/0/image").status_code == 403
+    r = client.post("/api/edit/export", json={"pages": [{"src": item["id"], "idx": 0}]})
+    assert r.status_code == 403
+
+    bad = client.post(f"/api/files/{item['id']}/unlock", json={"password": "nope"})
+    assert bad.status_code == 400
+    ok = client.post(f"/api/files/{item['id']}/unlock", json={"password": "pw"})
+    assert ok.status_code == 200 and ok.json()["page_count"] == 2
+
+    assert client.get(f"/api/files/{item['id']}/pages/0/image").status_code == 200
+    _, job = export(client, [{"src": item["id"], "idx": 1}])
+    out = tmp_path / "dl.pdf"
+    out.write_bytes(client.get(job["download_url"]).content)
+    assert page_texts(out) == ["S2"]
