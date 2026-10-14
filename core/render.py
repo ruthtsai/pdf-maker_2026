@@ -59,11 +59,12 @@ def render_page(
     width: int,
     password: str | None = None,
     fmt: str = "jpeg",
+    annots: bool = True,
 ) -> bytes:
     """Renders one page scaled to `width` pixels wide, cached on disk per (file, page, width)."""
     width = max(MIN_WIDTH, min(MAX_WIDTH, int(width)))
     ext = "png" if fmt == "png" else "jpg"
-    cache = file_utils.thumb_dir() / f"{file_id}_{page_index}_{width}.{ext}"
+    cache = file_utils.thumb_dir() / f"{file_id}_{page_index}_{width}{'' if annots else 'f'}.{ext}"
     if cache.exists():
         return cache.read_bytes()
 
@@ -73,7 +74,7 @@ def render_page(
             raise IndexError(f"page {page_index} out of range (0..{doc.page_count - 1})")
         page = doc.load_page(page_index)
         zoom = width / page.rect.width
-        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), colorspace=fitz.csRGB, alpha=False)
+        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), colorspace=fitz.csRGB, alpha=False, annots=annots)
         data = pix.tobytes("png") if fmt == "png" else pix.tobytes("jpeg", jpg_quality=82)
     finally:
         doc.close()

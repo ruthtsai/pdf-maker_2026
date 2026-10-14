@@ -229,3 +229,48 @@ def test_stamp_requires_an_image_file(client, tmp_path):
         json={"pages": [{"src": a["id"], "idx": 0}], "stamps": [{"file_id": "ghost"}]},
     )
     assert r.status_code == 404
+
+
+def test_form_api_detect_fill_and_flatten(client, tmp_path):
+    from tests.test_forms import build_form_pdf
+
+    path = tmp_path / "form.pdf"
+    path.write_bytes(build_form_pdf())
+    item = upload(client, path)
+
+    info = client.get(f"/api/files/{item['id']}/form").json()
+    assert info["is_form"] and len(info["fields"]) == 7
+    name_id = next(f["id"] for f in info["fields"] if f["name"] == "name")
+
+    # background image without the live form fields differs from the normal render
+    plain = client.get(f"/api/files/{item['id']}/pages/0/image?w=300&fmt=png").content
+    bare = client.get(f"/api/files/{item['id']}/pages/0/image?w=300&fmt=png&form=true").content
+    assert plain[:4] == bare[:4] == b"\x89PNG"
+
+    r = client.post(
+        "/api/forms/fill",
+        json={"file_id": item["id"], "values": {str(name_id): "王小明"}, "radios": {"color": "Red"},
+              "flatten": True, "output_name": "../filled.pdf"},
+    )
+    assert r.status_code == 200, r.text
+    job = run_job(client, r.json()["job_id"])
+    assert job["status"] == "done", job
+    out = tmp_path / "dl.pdf"
+    out.write_bytes(client.get(job["download_url"]).content)
+    with fitz.open(out) as d:
+        assert list(d[0].widgets()) == []
+        assert "王小明" in d[0].get_text()
+
+
+def test_form_api_reports_validation_errors(client, tmp_path):
+    from tests.test_forms import build_form_pdf
+
+    path = tmp_path / "form.pdf"
+    path.write_bytes(build_form_pdf())
+    item = upload(client, path)
+    info = client.get(f"/api/files/{item['id']}/form").json()
+    name_id = next(f["id"] for f in info["fields"] if f["name"] == "name")
+    r = client.post("/api/forms/fill", json={"file_id": item["id"], "values": {str(name_id): "x" * 30}})
+    job = run_job(client, r.json()["job_id"])
+    assert job["status"] == "error" and "最多 12" in job["error"]
+    assert client.get("/api/files/ghost/form").status_code == 404

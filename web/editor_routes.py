@@ -9,7 +9,9 @@ from fastapi import APIRouter, HTTPException, Query, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from core import editor, file_utils, render
+from typing import Any
+
+from core import editor, file_utils, forms, render
 from core.file_utils import PdfEncryptedError
 from core.jobs import Job, job_manager
 from models.file_item import FileItem, FileStatus, FileType
@@ -59,6 +61,14 @@ class StampIn(BaseModel):
     opacity: float = 1.0
     pages: list[int] | None = None
     name: str = ""
+
+
+class FormFill(BaseModel):
+    file_id: str
+    values: dict[str, Any] = {}
+    radios: dict[str, str] = {}
+    flatten: bool = False
+    output_name: str = "filled.pdf"
 
 
 class EditExport(BaseModel):
@@ -160,11 +170,13 @@ def page_image(
     page_index: int,
     w: int = Query(240, ge=render.MIN_WIDTH, le=render.MAX_WIDTH),
     fmt: Literal["jpeg", "png"] = "jpeg",
+    form: bool = False,
 ):
+    """`form=true` renders the page without its form fields (the form tab draws live inputs)."""
     item = _pdf_item(file_id)
     try:
         data = render.render_page(
-            file_id, Path(item.stored_path), page_index, w, store.passwords.get(file_id), fmt
+            file_id, Path(item.stored_path), page_index, w, store.passwords.get(file_id), fmt, annots=not form
         )
     except PdfEncryptedError as exc:
         raise HTTPException(403, detail=str(exc))
@@ -215,3 +227,47 @@ def preview_edit_page(body: EditExport, index: int = Query(0, ge=0), w: int = Qu
     except PdfEncryptedError as exc:
         raise HTTPException(403, detail=str(exc))
     return Response(content=png, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+# ---------- forms ----------
+
+
+@router.get("/api/files/{file_id}/form")
+def form_fields(file_id: str):
+    item = _pdf_item(file_id)
+    try:
+        return forms.detect_fields(Path(item.stored_path), store.passwords.get(file_id))
+    except PdfEncryptedError as exc:
+        raise HTTPException(403, detail=str(exc))
+
+
+@router.post("/api/forms/fill")
+def fill_form(body: FormFill):
+    item = _pdf_item(body.file_id)
+    name = file_utils.sanitize_filename(body.output_name.strip() or "filled.pdf", fallback="filled.pdf")
+    if not name.lower().endswith(".pdf"):
+        name += ".pdf"
+    output_path = file_utils.new_output_path(name)
+
+    store.mark_active([item.id])
+    job = job_manager.create()
+
+    def task(job: Job):
+        try:
+            return forms.fill_form(
+                Path(item.stored_path),
+                output_path,
+                body.values,
+                body.radios,
+                flatten=body.flatten,
+                password=store.passwords.get(item.id),
+                progress_cb=job.progress_cb,
+                cancel_check=job.cancel_check,
+            )
+        except (PdfEncryptedError, forms.FormError) as exc:
+            raise RuntimeError(str(exc)) from exc
+        finally:
+            store.unmark_active([item.id])
+
+    job_manager.run(job, task)
+    return {"job_id": job.id}

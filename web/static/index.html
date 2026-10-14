@@ -17,6 +17,7 @@
   <button class="tab-btn active" data-tab="merge">合併</button>
   <button class="tab-btn" data-tab="convert">PDF 轉影像</button>
   <button class="tab-btn" data-tab="edit">編輯頁面</button>
+  <button class="tab-btn" data-tab="form">填寫表單</button>
 </nav>
 
 <main>
@@ -176,11 +177,47 @@
 
     <div id="edit-result" class="result-area hidden"></div>
   </section>
+
+  <!-- ============ 填寫表單頁籤 ============ -->
+  <section id="tab-form" class="tab-panel">
+    <div id="form-dropzone" class="dropzone">
+      <p>拖曳含表單欄位的 PDF 到這裡，或</p>
+      <button id="form-add-btn" class="btn">選擇 PDF</button>
+      <input id="form-file-input" type="file" accept=".pdf" hidden />
+    </div>
+
+    <div id="form-info" class="pdf-info hidden"></div>
+
+    <div id="form-workspace" class="hidden">
+      <div class="edit-toolbar">
+        <span class="edit-status" id="form-status"></span>
+        <label class="save-as-toggle"><input id="form-highlight" type="checkbox" checked /> 標示欄位位置</label>
+        <span class="toolbar-spacer"></span>
+        <button class="btn" id="form-reset-btn">還原填寫內容</button>
+        <label id="form-save-as-row" class="save-as-toggle hidden">
+          <input id="form-save-as" type="checkbox" />
+          另存為（選擇儲存位置）
+        </label>
+        <button class="btn btn-primary" id="form-export-btn">匯出新檔…</button>
+      </div>
+      <p class="edit-hint">直接在頁面上填寫即可；匯出時可選擇保留可編輯，或攤平成不可再修改的文件。所有操作都只會輸出新檔，不會改動原檔。</p>
+      <div id="form-pages" class="form-pages"></div>
+    </div>
+
+    <div id="form-progress" class="progress-area hidden">
+      <div class="progress-bar"><div class="progress-bar-fill"></div></div>
+      <span class="progress-label"></span>
+      <button class="btn btn-cancel">取消</button>
+    </div>
+
+    <div id="form-result" class="result-area hidden"></div>
+  </section>
 </main>
 
 <div id="error-toast" class="error-toast hidden"></div>
 
 <script src="/app.js"></script>
 <script src="/editor.js"></script>
+<script src="/forms.js"></script>
 </body>
 </html>
