@@ -65,10 +65,18 @@ class NumberStamp:
 
 
 @dataclass
+class Bookmark:
+    level: int      # 1 = top level
+    title: str
+    page: int       # 0-based output page, or -1 for a heading without a destination
+
+
+@dataclass
 class EditRecipe:
     pages: list[PageRef] = field(default_factory=list)
     labels: list[LabelRule] = field(default_factory=list)
     number_stamp: NumberStamp | None = None
+    bookmarks: list[Bookmark] | None = None   # None: write no outline; []: explicitly empty
 
 
 def _open_source(src: Source) -> fitz.Document:
@@ -111,6 +119,11 @@ def validate_recipe(recipe: EditRecipe, page_counts: dict[str, int]) -> None:
             raise RecipeError("蓋印頁碼的起始號碼不可為負數")
         if not 4 <= ns.font_size <= 72:
             raise RecipeError("蓋印頁碼的字型大小需介於 4–72")
+    for b in recipe.bookmarks or []:
+        if b.level < 1:
+            raise RecipeError("書籤層級需大於等於 1")
+        if b.page >= total:
+            raise RecipeError(f"書籤「{b.title}」指向不存在的頁面")
 
 
 def assemble_pages(docs: dict[str, fitz.Document], refs: list[PageRef]) -> fitz.Document:
@@ -192,6 +205,26 @@ def _pdf_text_string(text: str) -> str:
     return "<FEFF" + text.encode("utf-16-be").hex().upper() + ">"
 
 
+def normalize_bookmarks(bookmarks: list[Bookmark], total: int) -> list[list]:
+    """PDF outlines need the first entry at level 1 and no level to jump more than one deeper
+    than the entry before it; clamp rather than fail so a stray indent never loses the outline."""
+    toc: list[list] = []
+    prev = 0
+    for b in bookmarks:
+        level = max(1, min(b.level, prev + 1))
+        title = b.title.strip() or "(未命名)"
+        page = b.page + 1 if 0 <= b.page < total else -1
+        toc.append([level, title, page])
+        prev = level
+    return toc
+
+
+def apply_bookmarks(doc: fitz.Document, bookmarks: list[Bookmark] | None) -> None:
+    if bookmarks is None:
+        return
+    doc.set_toc(normalize_bookmarks(bookmarks, doc.page_count))
+
+
 def apply_labels(doc: fitz.Document, labels: list[LabelRule]) -> None:
     if not labels:
         return
@@ -236,6 +269,7 @@ def build_document(
         step(len(used) + 1, total_steps, "套用設定")
         apply_overlays(out, recipe, list(range(out.page_count)), out.page_count)
         apply_labels(out, recipe.labels)
+        apply_bookmarks(out, recipe.bookmarks)
         return out
     finally:
         for d in docs.values():

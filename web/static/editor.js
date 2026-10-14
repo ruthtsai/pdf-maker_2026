@@ -12,6 +12,8 @@ const ed = {
   baseId: null,
   pages: [], // [{uid, src, idx, rot}]
   labels: [], // page-label rules [{start (0-based), style, prefix, first}]
+  bookmarks: [], // outline entries [{id, level, title, target (page uid | null)}]
+  nextBookmarkId: 1,
   numbering: null, // printed page numbers {v_pos,h_pos,fmt,start_page,start_number,font_size,margin} | null
   selection: new Set(), // uids
   anchor: null, // uid used as the start of a Shift range
@@ -143,7 +145,7 @@ function edSelectedPositions() {
 // ---------- history (undo / redo) ----------
 
 function edSnapshot() {
-  return JSON.stringify({ pages: ed.pages, labels: ed.labels, numbering: ed.numbering });
+  return JSON.stringify({ pages: ed.pages, labels: ed.labels, numbering: ed.numbering, bookmarks: ed.bookmarks });
 }
 
 function edUpdateHistoryButtons() {
@@ -174,6 +176,7 @@ function edGoto(index) {
   ed.pages = snap.pages;
   ed.labels = snap.labels;
   ed.numbering = snap.numbering;
+  ed.bookmarks = snap.bookmarks;
   const alive = new Set(ed.pages.map((p) => p.uid));
   ed.selection = new Set([...ed.selection].filter((u) => alive.has(u)));
   edUpdateHistoryButtons();
@@ -248,6 +251,13 @@ async function edStartSession(item) {
     first: l.firstpagenum || 1,
   }));
   ed.numbering = null;
+  ed.nextBookmarkId = 1;
+  ed.bookmarks = (info.toc || []).map((t) => ({
+    id: ed.nextBookmarkId++,
+    level: t.level,
+    title: t.title,
+    target: t.page >= 1 && t.page <= item.page_count ? ed.pages[t.page - 1].uid : null,
+  }));
   ed.selection = new Set();
   ed.anchor = null;
   edResetHistory();
@@ -632,6 +642,10 @@ function edApplyReplace(source, pairs) {
   const fresh = [];
   pairs.forEach(({ pos, srcIdx }) => {
     const page = edNewPage(source.id, srcIdx, 0);
+    const old = ed.pages[pos - 1];
+    ed.bookmarks.forEach((b) => {
+      if (b.target === old.uid) b.target = page.uid;
+    });
     ed.pages[pos - 1] = page;
     fresh.push(page.uid);
   });
@@ -983,6 +997,173 @@ function edOpenNumberingDialog() {
   refreshPreview();
 }
 
+// ---------- bookmarks ----------
+
+function edOpenBookmarkDialog() {
+  const total = ed.pages.length;
+  let items = ed.bookmarks.map((b) => ({ ...b }));
+  let nextId = Math.max(0, ...items.map((b) => b.id)) + 1;
+  const err = h("div", { class: "dialog-error" });
+  const list = h("div", { class: "bm-list" });
+  let dragIndex = null;
+
+  const subtreeEndIn = (arr, i) => {
+    let j = i + 1;
+    while (j < arr.length && arr[j].level > arr[i].level) j++;
+    return j;
+  };
+  const posOfTarget = (t) => {
+    const i = t === null ? -1 : ed.pages.findIndex((p) => p.uid === t);
+    return i >= 0 ? i + 1 : null;
+  };
+
+  function shiftLevel(i, delta) {
+    const end = subtreeEndIn(items, i);
+    const maxLevel = i === 0 ? 1 : items[i - 1].level + 1;
+    const target = Math.max(1, Math.min(items[i].level + delta, maxLevel));
+    const applied = target - items[i].level;
+    if (!applied) return;
+    for (let k = i; k < end; k++) items[k].level = Math.max(1, items[k].level + applied);
+    render();
+  }
+
+  function removeItem(i) {
+    const end = subtreeEndIn(items, i);
+    for (let k = i + 1; k < end; k++) items[k].level = Math.max(1, items[k].level - 1); // promote children
+    items.splice(i, 1);
+    render();
+  }
+
+  // Moves bookmark `from` together with its children next to row `toRow`.
+  function moveSubtree(from, toRow, after) {
+    const end = subtreeEndIn(items, from);
+    if (toRow >= from && toRow < end) return; // dropped inside itself
+    const block = items.slice(from, end);
+    const rest = [...items.slice(0, from), ...items.slice(end)];
+    const row = toRow < from ? toRow : toRow - block.length;
+    const at = after ? subtreeEndIn(rest, row) : row;
+    items = [...rest.slice(0, at), ...block, ...rest.slice(at)];
+    render();
+  }
+
+  function render() {
+    list.innerHTML = "";
+    if (!items.length) list.append(h("div", { class: "picker-info" }, "目前沒有任何書籤。按「新增書籤」建立。"));
+    items.forEach((b, i) => {
+      const pos = posOfTarget(b.target);
+      const handle = h("span", { class: "bm-handle", draggable: "true", title: "拖曳以調整順序（子項會一起移動）" }, "⋮⋮");
+      const row = h(
+        "div",
+        { class: "bm-row" },
+        handle,
+        h("div", { class: "bm-indent", style: `width:${(b.level - 1) * 22}px` }),
+        h("input", {
+          type: "text",
+          class: "bm-title",
+          value: b.title,
+          placeholder: "書籤標題",
+          oninput: (e) => (b.title = e.target.value),
+        }),
+        h("span", { class: "bm-target-label" }, "第"),
+        h("input", {
+          type: "number",
+          class: "bm-target",
+          min: "1",
+          max: String(total),
+          value: pos === null ? "" : String(pos),
+          placeholder: "—",
+          onchange: (e) => {
+            const n = Number(e.target.value);
+            b.target = e.target.value !== "" && Number.isInteger(n) && n >= 1 && n <= total ? ed.pages[n - 1].uid : null;
+            render();
+          },
+        }),
+        h("span", { class: "bm-target-label" }, "頁"),
+        h("button", { class: "btn-icon", title: "升階（往左）", onclick: () => shiftLevel(i, -1) }, "⇤"),
+        h("button", { class: "btn-icon", title: "降階（往右）", onclick: () => shiftLevel(i, 1) }, "⇥"),
+        h("button", { class: "btn-icon", title: "刪除（子項會升一階）", onclick: () => removeItem(i) }, "🗑"),
+        pos === null ? h("span", { class: "bm-warn" }, b.target === null ? "未指定目標頁" : "目標頁已不存在") : null
+      );
+      handle.addEventListener("dragstart", (e) => {
+        dragIndex = i;
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("text/plain", String(i));
+        row.classList.add("dragging");
+      });
+      handle.addEventListener("dragend", () => {
+        dragIndex = null;
+        list.querySelectorAll(".dragging, .drop-before, .drop-after").forEach((el) => el.classList.remove("dragging", "drop-before", "drop-after"));
+      });
+      row.addEventListener("dragover", (e) => {
+        if (dragIndex === null) return;
+        e.preventDefault();
+        const rect = row.getBoundingClientRect();
+        const after = e.clientY > rect.top + rect.height / 2;
+        list.querySelectorAll(".drop-before, .drop-after").forEach((el) => el.classList.remove("drop-before", "drop-after"));
+        row.classList.add(after ? "drop-after" : "drop-before");
+      });
+      row.addEventListener("drop", (e) => {
+        if (dragIndex === null) return;
+        e.preventDefault();
+        const rect = row.getBoundingClientRect();
+        const after = e.clientY > rect.top + rect.height / 2;
+        const from = dragIndex;
+        dragIndex = null;
+        moveSubtree(from, i, after);
+      });
+      list.append(row);
+    });
+  }
+  render();
+
+  const firstSelected = ed.pages.find((p) => ed.selection.has(p.uid));
+  const addBtn = h(
+    "button",
+    {
+      class: "btn",
+      onclick: () => {
+        const target = (firstSelected || ed.pages[0]).uid;
+        items.push({ id: nextId++, level: 1, title: "新書籤", target });
+        render();
+        list.scrollTop = list.scrollHeight;
+      },
+    },
+    "＋ 新增書籤"
+  );
+
+  openModal({
+    title: "編輯書籤",
+    body: h(
+      "div",
+      {},
+      h("div", { class: "inline-row" }, addBtn, h("span", { class: "picker-info" }, firstSelected ? "新書籤預設指向目前選取的第一個頁面" : "新書籤預設指向第 1 頁")),
+      list,
+      h(
+        "div",
+        { class: "picker-info" },
+        "拖曳 ⋮⋮ 調整順序；⇤ ⇥ 調整層級（子項會一起移動）；「第 N 頁」可改書籤指向的頁面。頁碼以目前畫面順序為準，之後重新排序頁面時書籤會自動跟著頁面。"
+      ),
+      err
+    ),
+    actions: [
+      { label: "取消" },
+      {
+        label: "套用",
+        primary: true,
+        onClick: () => {
+          const blank = items.findIndex((b) => !b.title.trim());
+          if (blank >= 0) {
+            err.textContent = `第 ${blank + 1} 個書籤沒有標題`;
+            return true;
+          }
+          ed.bookmarks = items.map((b) => ({ ...b, title: b.title.trim() }));
+          edCommit();
+        },
+      },
+    ],
+  });
+}
+
 // ---------- single page preview ----------
 
 function edOpenPreview(startUid) {
@@ -1079,6 +1260,10 @@ function edSummary() {
     parts.push(`蓋印頁碼：${fmt}，從第 ${ed.numbering.start_page} 頁開始`);
   }
   if (ed.labels.length) parts.push(`頁碼標籤：${ed.labels.length} 條規則`);
+  if (ed.bookmarks.length) {
+    const lost = edBookmarksForExport().filter((b) => b.page < 0).length;
+    parts.push(`書籤：${ed.bookmarks.length} 個` + (lost ? `（其中 ${lost} 個沒有指向有效頁面）` : ""));
+  }
   return parts;
 }
 
@@ -1088,8 +1273,20 @@ function edRecipe(outputName, overrides = {}) {
     output_name: outputName,
     page_labels: ed.labels,
     page_numbers: ed.numbering,
+    bookmarks: edBookmarksForExport(),
     ...overrides,
   };
+}
+
+// Bookmark targets are stored as page identities so reordering follows them; the server
+// needs the current 0-based position (-1 when the target page no longer exists).
+function edBookmarksForExport() {
+  const position = new Map(ed.pages.map((p, i) => [p.uid, i]));
+  return ed.bookmarks.map((b) => ({
+    level: b.level,
+    title: b.title,
+    page: b.target !== null && position.has(b.target) ? position.get(b.target) : -1,
+  }));
 }
 
 const edHasOverlays = () => !!ed.numbering;
@@ -1172,6 +1369,7 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("edit-insert-btn").addEventListener("click", edOpenInsertDialog);
   document.getElementById("edit-replace-btn").addEventListener("click", edOpenReplaceDialog);
   document.getElementById("edit-numbering-btn").addEventListener("click", edOpenNumberingDialog);
+  document.getElementById("edit-bookmark-btn").addEventListener("click", edOpenBookmarkDialog);
   document.querySelectorAll("#edit-toolbar [data-rotate]").forEach((btn) => {
     btn.addEventListener("click", () => edRotate(Number(btn.dataset.rotate)));
   });

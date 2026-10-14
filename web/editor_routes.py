@@ -43,11 +43,18 @@ class NumberStampIn(BaseModel):
     margin: float = 28
 
 
+class BookmarkIn(BaseModel):
+    level: int = 1
+    title: str = ""
+    page: int = -1
+
+
 class EditExport(BaseModel):
     pages: list[EditPage]
     output_name: str = "edited.pdf"
     page_labels: list[LabelRuleIn] = []
     page_numbers: NumberStampIn | None = None
+    bookmarks: list[BookmarkIn] | None = None
 
 
 # ---------- helpers ----------
@@ -82,6 +89,9 @@ def _recipe_from_request(body: EditExport) -> tuple[editor.EditRecipe, dict[str,
         pages=[editor.PageRef(p.src, p.idx, p.rot) for p in body.pages],
         labels=[editor.LabelRule(r.start, r.style, r.prefix, r.first) for r in body.page_labels],
         number_stamp=editor.NumberStamp(**body.page_numbers.model_dump()) if body.page_numbers else None,
+        bookmarks=None
+        if body.bookmarks is None
+        else [editor.Bookmark(b.level, b.title, b.page) for b in body.bookmarks],
     )
     try:
         editor.validate_recipe(recipe, page_counts)

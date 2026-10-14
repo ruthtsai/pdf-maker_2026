@@ -195,3 +195,16 @@
 .rule-row input[type="number"] { width: 58px; }
 .rule-row input[type="text"] { width: 70px; }
 .rule-row select { max-width: 150px; }
+
+.bm-list { max-height: 52vh; overflow: auto; border: 1px solid var(--border); border-radius: 8px; padding: 6px; margin: 8px 0; min-width: 640px; }
+.bm-row { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border-radius: 6px; flex-wrap: wrap; }
+.bm-row:hover { background: #f4f6fa; }
+.bm-row.dragging { opacity: .4; }
+.bm-row.drop-before { box-shadow: 0 -3px 0 var(--primary); }
+.bm-row.drop-after { box-shadow: 0 3px 0 var(--primary); }
+.bm-handle { cursor: grab; color: var(--muted); user-select: none; padding: 0 4px; }
+.bm-indent { flex-shrink: 0; }
+.bm-title { flex: 1; min-width: 160px; padding: 5px 7px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; }
+.bm-target { width: 62px; padding: 5px 6px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; }
+.bm-target-label { font-size: 12px; color: var(--muted); }
+.bm-warn { font-size: 11px; color: var(--danger); }
