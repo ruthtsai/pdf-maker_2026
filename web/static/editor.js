@@ -17,6 +17,9 @@ const ED_THUMB_W = 280; // thumbnail image width requested from the server
 
 let ed = null; // the current Edit Session; replaced whenever another file is opened
 let edOpened = null; // the file last opened in this tab, even before it could be edited
+// Files uploaded in an open dialog and not applied yet (id -> name); the dialog drops
+// them when it closes, after which only the Edit Session keeps what it uses.
+const edDialogUploads = new Map();
 let edDragUids = null; // uids being dragged while a reorder drag is active
 
 // ---------- geometry ----------
@@ -137,11 +140,13 @@ function edFileName(id) {
 }
 
 // The files on the server this tab still needs: an opened file still waiting for its
-// password, and everything the Edit Session or its undo history uses.
+// password, files uploaded in a dialog that is still open, and everything the Edit
+// Session or its undo history uses.
 function edKeptFiles() {
   const ids = new Set(ed ? ed.referencedFiles() : []);
   const files = [...ids].map((id) => ({ id, name: edFileName(id) }));
   if (edOpened && !ids.has(edOpened.id)) files.push({ id: edOpened.id, name: edOpened.name });
+  for (const [id, name] of edDialogUploads) if (!ids.has(id)) files.push({ id, name });
   return files;
 }
 
@@ -397,6 +402,7 @@ function edSourcePicker(onChange) {
     try {
       const item = await apiFetch(`${API}/upload`, { method: "POST", body: form });
       uploaded.push(item.id);
+      edDialogUploads.set(item.id, item.name);
       await handle(item);
     } catch (err) {
       info.textContent = `上傳失敗：${err.message}`;
@@ -411,6 +417,7 @@ function edSourcePicker(onChange) {
     // Files uploaded for a dialog that never made it into the document are discarded.
     cleanup() {
       uploaded.forEach((id) => {
+        edDialogUploads.delete(id);
         if (ed.referencesFile(id)) return;
         ed.forgetSource(id);
         apiFetch(`${API}/files/${id}`, { method: "DELETE" }).catch(() => {});
@@ -1244,6 +1251,7 @@ function edOpenStampDialog() {
     try {
       const item = await apiFetch(`${API}/upload`, { method: "POST", body: form });
       uploaded.push(item.id);
+      edDialogUploads.set(item.id, item.name);
       if (item.status !== "ok" || item.type !== "image") {
         err.textContent = item.error_message || "無法使用這個檔案";
         return;
@@ -1328,6 +1336,7 @@ function edOpenStampDialog() {
       if (objectUrl) URL.revokeObjectURL(objectUrl);
       // images uploaded in this dialog that ended up unused are discarded again
       uploaded.forEach((id) => {
+        edDialogUploads.delete(id);
         if (ed.referencesFile(id)) return;
         apiFetch(`${API}/files/${id}`, { method: "DELETE" }).catch(() => {});
       });
