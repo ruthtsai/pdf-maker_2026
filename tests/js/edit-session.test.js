@@ -294,6 +294,7 @@ test("the summary reports what the export will contain", () => {
     rotatedPages: 3,
     numbering: { fmt: "number", startPage: 1 },
     stamps: 1,
+    lostStamps: 0,
     labelRules: 1,
     bookmarks: 2,
     lostBookmarks: 1,
@@ -423,4 +424,30 @@ test("a stamp image stays referenced while undo can reach it", () => {
   s.undo();
   assert.equal(s.referencesFile("img"), true);
   assert.equal(s.referencesFile("unused"), false);
+});
+
+test("a page-limited stamp passes to the page that replaces its page", () => {
+  const s = open({}, 3);
+  s.applyStamps([stamp(s.stampScope("range", [1, 2]))]);
+  s.addSource(item("other", 1), pagesInfo(1));
+  s.replacePages("other", [{ pos: 2, srcIdx: 0 }]);
+  assert.deepEqual(s.recipe("x.pdf").stamps[0].pages, [0, 1]);
+  assert.equal(s.summary().lostStamps, 0);
+});
+
+test("undoing a replace gives the stamp back to the original page", () => {
+  const s = open({}, 2);
+  s.applyStamps([stamp(s.stampScope("current", [2]))]);
+  const uid = s.pages[1].uid;
+  s.addSource(item("other", 1), pagesInfo(1));
+  s.replacePages("other", [{ pos: 2, srcIdx: 0 }]);
+  s.undo();
+  assert.deepEqual(s.stamps[0].scope.uids, [uid]);
+});
+
+test("the summary counts a stamp none of whose pages remain", () => {
+  const s = open({}, 2);
+  s.applyStamps([stamp({ mode: "pages", uids: [999] })]);
+  assert.equal(s.summary().lostStamps, 1);
+  assert.deepEqual(s.recipe("x.pdf").stamps, []);
 });

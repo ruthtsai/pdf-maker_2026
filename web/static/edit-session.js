@@ -116,6 +116,16 @@ export function createEditSession(source, info) {
 
   const positionOf = (uid) => pages.findIndex((p) => p.uid === uid);
 
+  // Page-following references pass from a page to the one that takes its place.
+  function transferReferences(fromUid, toUid) {
+    bookmarks.forEach((b) => {
+      if (b.target === fromUid) b.target = toUid;
+    });
+    stamps.forEach((st) => {
+      if (st.scope.mode === "pages") st.scope.uids = st.scope.uids.map((u) => (u === fromUid ? toUid : u));
+    });
+  }
+
   // Stamps limited to chosen pages are stored by page identity; the server wants output positions.
   function stampsForRecipe() {
     const position = new Map(pages.map((p, i) => [p.uid, i]));
@@ -285,9 +295,7 @@ export function createEditSession(source, info) {
       pairs.forEach(({ pos, srcIdx }) => {
         const page = newPage(sourceId, srcIdx);
         const old = pages[pos - 1];
-        bookmarks.forEach((b) => {
-          if (b.target === old.uid) b.target = page.uid;
-        });
+        transferReferences(old.uid, page.uid);
         pages[pos - 1] = page;
         fresh.push(page.uid);
       });
@@ -384,6 +392,7 @@ export function createEditSession(source, info) {
         rotatedPages: pages.filter((p) => p.rot).length,
         numbering: numbering && { fmt: numbering.fmt, startPage: numbering.start_page },
         stamps: stamps.length,
+        lostStamps: stamps.length - stampsForRecipe().length,
         labelRules: labels.length,
         bookmarks: bookmarks.length,
         lostBookmarks: bookmarksForRecipe().filter((b) => b.page < 0).length,

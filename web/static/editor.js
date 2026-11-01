@@ -1365,7 +1365,7 @@ function edSummaryLines() {
     const fmt = ED_NUMBER_FORMATS.find((f) => f[0] === t.numbering.fmt)[1];
     lines.push(`蓋印頁碼：${fmt}，從第 ${t.numbering.startPage} 頁開始`);
   }
-  if (t.stamps) lines.push(`蓋章：${t.stamps} 個`);
+  if (t.stamps) lines.push(`蓋章：${t.stamps} 個` + (t.lostStamps ? `（其中 ${t.lostStamps} 個的頁面已不存在，不會蓋上）` : ""));
   if (t.labelRules) lines.push(`頁碼標籤：${t.labelRules} 條規則`);
   if (t.bookmarks) lines.push(`書籤：${t.bookmarks} 個` + (t.lostBookmarks ? `（其中 ${t.lostBookmarks} 個沒有指向有效頁面）` : ""));
   return lines;
