@@ -19,9 +19,11 @@ from core.jobs import Job, JobStatus, job_manager
 from models.file_item import FileItem, FileStatus, FileType
 from web import store
 from web.editor_routes import hold_or_404, router as editor_router
+from web.tool_routes import router as tool_router
 
 app = FastAPI(title="PDF／影像合併與轉換工具")
 app.include_router(editor_router)
+app.include_router(tool_router)
 
 # A PyInstaller onefile build extracts bundled data under sys._MEIPASS instead of
 # next to this .py file (which isn't a real file on disk once frozen).

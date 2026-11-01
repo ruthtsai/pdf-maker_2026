@@ -16,6 +16,7 @@
 <nav class="tabs">
   <button class="tab-btn active" data-tab="merge">合併</button>
   <button class="tab-btn" data-tab="convert">PDF 轉影像</button>
+  <button class="tab-btn" data-tab="split">拆分</button>
   <button class="tab-btn" data-tab="edit">編輯頁面</button>
   <button class="tab-btn" data-tab="form">填寫表單</button>
 </nav>
@@ -115,6 +116,48 @@
     </div>
 
     <div id="convert-result" class="result-area hidden"></div>
+  </section>
+
+  <!-- ============ 拆分頁籤 ============ -->
+  <section id="tab-split" class="tab-panel">
+    <div class="dropzone" id="split-dropzone">
+      <p>拖曳要拆分的 PDF 到這裡，或</p>
+      <button id="split-add-btn" class="btn">選擇 PDF</button>
+      <input id="split-file-input" type="file" accept=".pdf" hidden />
+    </div>
+
+    <div id="split-info" class="pdf-info hidden"></div>
+
+    <div class="options-row">
+      <label>拆分方式
+        <select id="opt-split-mode">
+          <option value="ranges">依範圍</option>
+          <option value="every">每 N 頁</option>
+        </select>
+      </label>
+      <label id="opt-split-ranges-label">頁碼範圍（以分號分隔，每組輸出一個 PDF，例如 1-3;4;5-8）
+        <input id="opt-split-ranges" type="text" placeholder="1-3;4;5-8" />
+      </label>
+      <label id="opt-split-every-label" class="hidden">每幾頁一份
+        <input id="opt-split-every" type="number" min="1" value="1" />
+      </label>
+    </div>
+
+    <div class="action-row">
+      <button id="split-start-btn" class="btn btn-primary" disabled>開始拆分</button>
+      <label id="split-save-as-row" class="save-as-toggle hidden">
+        <input id="split-save-as" type="checkbox" />
+        另存為（選擇儲存位置）
+      </label>
+    </div>
+
+    <div id="split-progress" class="progress-area hidden">
+      <div class="progress-bar"><div class="progress-bar-fill"></div></div>
+      <span class="progress-label"></span>
+      <button class="btn btn-cancel">取消</button>
+    </div>
+
+    <div id="split-result" class="result-area hidden"></div>
   </section>
 
   <!-- ============ 編輯頁面頁籤 ============ -->
