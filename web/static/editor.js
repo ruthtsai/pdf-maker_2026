@@ -1,4 +1,11 @@
-import { createEditSession } from "./edit-session.js";
+import {
+  DEFAULT_NUMBERING,
+  createEditSession,
+  moveBookmarkSubtree,
+  removeBookmark,
+  shiftBookmarkLevel,
+  stampScopeKind,
+} from "./edit-session.js";
 import { h, openModal } from "./ui.js";
 
 // ---------- page editor ----------
@@ -540,9 +547,7 @@ function edOpenNumberingDialog() {
   const total = ed.pages.length;
   let rules = ed.labels.map((r) => ({ ...r }));
   let stampOn = !!ed.numbering;
-  const stamp = ed.numbering
-    ? { ...ed.numbering }
-    : { v_pos: "bottom", h_pos: "center", fmt: "number", start_page: 1, start_number: 1, font_size: 10, margin: 28 };
+  const stamp = { ...(ed.numbering || DEFAULT_NUMBERING) };
   let previewIndex = Math.min(Math.max(stamp.start_page, 1), total) - 1;
   let timer = null;
   let objectUrl = null;
@@ -556,7 +561,7 @@ function edOpenNumberingDialog() {
     const mine = ++token;
     previewNote.textContent = stampOn ? `預覽第 ${previewIndex + 1} 頁` : "尚未啟用蓋印頁碼，預覽為原始頁面";
     try {
-      const body = edRecipe("preview.pdf", { page_labels: [], page_numbers: stampOn ? { ...stamp } : null });
+      const body = ed.recipe("preview.pdf", { page_labels: [], page_numbers: stampOn ? { ...stamp } : null });
       const res = await fetch(`${API}/edit/preview?index=${previewIndex}&w=520`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -727,11 +732,6 @@ function edOpenNumberingDialog() {
     h("div", { class: "num-preview" }, h("div", { class: "num-preview-frame" }, previewImg), previewNote)
   );
 
-  const fail = (message) => {
-    err.textContent = message;
-    return true;
-  };
-
   const dialog = openModal({
     title: "頁碼設定",
     body,
@@ -741,18 +741,12 @@ function edOpenNumberingDialog() {
         label: "套用",
         primary: true,
         onClick: () => {
-          for (const r of rules) {
-            if (!Number.isInteger(r.start) || r.start < 0 || r.start >= total) return fail(`標籤規則的起始頁需介於 1 到 ${total}`);
-            if (!Number.isInteger(r.first) || r.first < 1) return fail("標籤規則的起始號碼需大於等於 1");
+          try {
+            ed.applyPageNumbers(rules, stampOn ? stamp : null);
+          } catch (e) {
+            err.textContent = e.message;
+            return true;
           }
-          if (new Set(rules.map((r) => r.start)).size !== rules.length) return fail("不同規則不能從同一頁開始");
-          if (stampOn) {
-            if (!Number.isInteger(stamp.start_page) || stamp.start_page < 1 || stamp.start_page > total)
-              return fail(`蓋印的起始頁需介於 1 到 ${total}`);
-            if (!Number.isFinite(stamp.start_number) || stamp.start_number < 0) return fail("起始號碼不可為負數");
-            if (!Number.isFinite(stamp.font_size) || stamp.font_size < 4 || stamp.font_size > 72) return fail("字型大小需介於 4–72");
-          }
-          ed.applyPageNumbers(rules.map((r) => ({ ...r })).sort((a, b) => a.start - b.start), stampOn ? { ...stamp } : null);
         },
       },
     ],
@@ -776,42 +770,8 @@ function edOpenBookmarkDialog() {
   const list = h("div", { class: "bm-list" });
   let dragIndex = null;
 
-  const subtreeEndIn = (arr, i) => {
-    let j = i + 1;
-    while (j < arr.length && arr[j].level > arr[i].level) j++;
-    return j;
-  };
-  const posOfTarget = (t) => {
-    const i = t === null ? -1 : ed.pages.findIndex((p) => p.uid === t);
-    return i >= 0 ? i + 1 : null;
-  };
-
-  function shiftLevel(i, delta) {
-    const end = subtreeEndIn(items, i);
-    const maxLevel = i === 0 ? 1 : items[i - 1].level + 1;
-    const target = Math.max(1, Math.min(items[i].level + delta, maxLevel));
-    const applied = target - items[i].level;
-    if (!applied) return;
-    for (let k = i; k < end; k++) items[k].level = Math.max(1, items[k].level + applied);
-    render();
-  }
-
-  function removeItem(i) {
-    const end = subtreeEndIn(items, i);
-    for (let k = i + 1; k < end; k++) items[k].level = Math.max(1, items[k].level - 1); // promote children
-    items.splice(i, 1);
-    render();
-  }
-
-  // Moves bookmark `from` together with its children next to row `toRow`.
-  function moveSubtree(from, toRow, after) {
-    const end = subtreeEndIn(items, from);
-    if (toRow >= from && toRow < end) return; // dropped inside itself
-    const block = items.slice(from, end);
-    const rest = [...items.slice(0, from), ...items.slice(end)];
-    const row = toRow < from ? toRow : toRow - block.length;
-    const at = after ? subtreeEndIn(rest, row) : row;
-    items = [...rest.slice(0, at), ...block, ...rest.slice(at)];
+  function update(next) {
+    items = next;
     render();
   }
 
@@ -819,7 +779,7 @@ function edOpenBookmarkDialog() {
     list.innerHTML = "";
     if (!items.length) list.append(h("div", { class: "picker-info" }, "目前沒有任何書籤。按「新增書籤」建立。"));
     items.forEach((b, i) => {
-      const pos = posOfTarget(b.target);
+      const pos = ed.bookmarkPosition(b);
       const handle = h("span", { class: "bm-handle", draggable: "true", title: "拖曳以調整順序（子項會一起移動）" }, "⋮⋮");
       const row = h(
         "div",
@@ -848,9 +808,9 @@ function edOpenBookmarkDialog() {
           },
         }),
         h("span", { class: "bm-target-label" }, "頁"),
-        h("button", { class: "btn-icon", title: "升階（往左）", onclick: () => shiftLevel(i, -1) }, "⇤"),
-        h("button", { class: "btn-icon", title: "降階（往右）", onclick: () => shiftLevel(i, 1) }, "⇥"),
-        h("button", { class: "btn-icon", title: "刪除（子項會升一階）", onclick: () => removeItem(i) }, "🗑"),
+        h("button", { class: "btn-icon", title: "升階（往左）", onclick: () => update(shiftBookmarkLevel(items, i, -1)) }, "⇤"),
+        h("button", { class: "btn-icon", title: "降階（往右）", onclick: () => update(shiftBookmarkLevel(items, i, 1)) }, "⇥"),
+        h("button", { class: "btn-icon", title: "刪除（子項會升一階）", onclick: () => update(removeBookmark(items, i)) }, "🗑"),
         pos === null ? h("span", { class: "bm-warn" }, b.target === null ? "未指定目標頁" : "目標頁已不存在") : null
       );
       handle.addEventListener("dragstart", (e) => {
@@ -878,7 +838,7 @@ function edOpenBookmarkDialog() {
         const after = e.clientY > rect.top + rect.height / 2;
         const from = dragIndex;
         dragIndex = null;
-        moveSubtree(from, i, after);
+        update(moveBookmarkSubtree(items, from, i, after));
       });
       list.append(row);
     });
@@ -920,12 +880,12 @@ function edOpenBookmarkDialog() {
         label: "套用",
         primary: true,
         onClick: () => {
-          const blank = items.findIndex((b) => !b.title.trim());
-          if (blank >= 0) {
-            err.textContent = `第 ${blank + 1} 個書籤沒有標題`;
+          try {
+            ed.applyBookmarks(items);
+          } catch (e) {
+            err.textContent = e.message;
             return true;
           }
-          ed.applyBookmarks(items.map((b) => ({ ...b, title: b.title.trim() })));
         },
       },
     ],
@@ -946,7 +906,6 @@ function edOpenStampDialog() {
   const err = h("div", { class: "dialog-error" });
 
   const selected = () => stamps.find((st) => st.id === selectedId) || null;
-  const appliesTo = (st, pageIndex) => st.scope.mode === "all" || st.scope.uids.includes(ed.pages[pageIndex].uid);
 
   // ----- stage: the page with draggable stamps on top -----
   const pageImg = h("img", { class: "stamp-page", alt: "" });
@@ -971,7 +930,7 @@ function edOpenStampDialog() {
       const res = await fetch(`${API}/edit/preview?index=${cur}&w=900`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(edRecipe("preview.pdf", { page_labels: [], stamps: [] })),
+        body: JSON.stringify(ed.recipe("preview.pdf", { page_labels: [], stamps: [] })),
       });
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText);
       const url = URL.createObjectURL(await res.blob());
@@ -997,7 +956,7 @@ function edOpenStampDialog() {
     stage.querySelectorAll(".stamp-box").forEach((el) => el.remove());
     const rect = () => stage.getBoundingClientRect();
     for (const st of stamps) {
-      if (!appliesTo(st, cur)) continue;
+      if (!ed.stampAppliesTo(st, cur)) continue;
       const active = st.id === selectedId;
       const img = h("img", { src: `${API}/files/${st.file}/raw`, alt: st.name, draggable: "false" });
       const box = h("div", { class: "stamp-box" + (active ? " active" : "") }, img);
@@ -1150,7 +1109,7 @@ function edOpenStampDialog() {
     const rangeInput = h("input", {
       type: "text",
       placeholder: "例如 1-3,5",
-      value: st.scope.mode === "pages" ? edCompactRange(st.scope.uids.map((u) => ed.positionOf(u) + 1).filter((n) => n > 0).sort((a, b) => a - b)) : "",
+      value: st.scope.mode === "pages" ? edCompactRange(ed.stampPositions(st)) : "",
     });
     const radio = (value, label, extra) =>
       h(
@@ -1160,23 +1119,19 @@ function edOpenStampDialog() {
           type: "radio",
           name: "stamp-scope",
           value,
-          checked: scopeKind(st) === value,
+          checked: stampScopeKind(st) === value,
           onchange: () => setScope(value),
         }),
         label,
         extra
       );
-    const scopeKind = (x) => {
-      if (x.scope.mode === "all") return "all";
-      return x.scope.custom ? "range" : "current";
-    };
     function setScope(kind) {
       err.textContent = "";
-      if (kind === "all") st.scope = { mode: "all" };
-      else if (kind === "current") st.scope = { mode: "pages", uids: [ed.pages[cur].uid] };
+      if (kind === "all") st.scope = ed.stampScope("all");
+      else if (kind === "current") st.scope = ed.stampScope("current", [cur + 1]);
       else {
         const nums = rangeInput.value.trim() ? safeRange(rangeInput.value) : [cur + 1];
-        st.scope = { mode: "pages", custom: true, uids: nums.map((n) => ed.pages[n - 1].uid) };
+        st.scope = ed.stampScope("range", nums);
         if (!rangeInput.value.trim()) rangeInput.value = edCompactRange(nums);
       }
       drawStamps();
@@ -1193,7 +1148,7 @@ function edOpenStampDialog() {
       const nums = safeRange(rangeInput.value);
       if (!nums.length) return;
       err.textContent = "";
-      st.scope = { mode: "pages", custom: true, uids: nums.map((n) => ed.pages[n - 1].uid) };
+      st.scope = ed.stampScope("range", nums);
       controls.querySelector('input[value="range"]').checked = true;
       drawStamps();
     });
@@ -1292,18 +1247,12 @@ function edOpenStampDialog() {
         label: "套用",
         primary: true,
         onClick: () => {
-          for (const st of stamps) {
-            if (st.scope.mode === "pages" && !st.scope.uids.length) {
-              err.textContent = `「${st.name}」沒有指定任何頁面`;
-              return true;
-            }
+          try {
+            ed.applyStamps(stamps);
+          } catch (e) {
+            err.textContent = e.message;
+            return true;
           }
-          ed.applyStamps(
-            stamps.map((st) => {
-              const { custom, ...scope } = st.scope;
-              return { ...st, scope };
-            })
-          );
         },
       },
     ],
@@ -1344,7 +1293,7 @@ function edOpenPreview(startUid) {
     const res = await fetch(`${API}/edit/preview?index=${pos}&w=1100`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(edRecipe("preview.pdf", { page_labels: [] })),
+      body: JSON.stringify(ed.recipe("preview.pdf", { page_labels: [] })),
     });
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || res.statusText);
     return URL.createObjectURL(await res.blob());
@@ -1353,7 +1302,7 @@ function edOpenPreview(startUid) {
   function show() {
     const page = ed.pages[pos];
     const token = ++showToken;
-    if (edHasOverlays()) {
+    if (ed.hasOverlays) {
       // The server already applied the page rotation and overlays: show it as-is.
       const size = edPageSize(page);
       const vis = page.rot % 180 !== 0 ? { w: size.h, h: size.w } : size;
@@ -1407,65 +1356,20 @@ function edOpenPreview(startUid) {
 
 // ---------- export ----------
 
-function edSummary() {
-  const base = ed.sources[ed.baseId];
-  const foreign = ed.pages.filter((p) => p.src !== ed.baseId).length;
-  const rotated = ed.pages.filter((p) => p.rot).length;
-  const parts = [`原始檔案 ${base.page_count} 頁 → 輸出 ${ed.pages.length} 頁`];
-  if (foreign) parts.push(`其中 ${foreign} 頁來自其他 PDF`);
-  if (rotated) parts.push(`${rotated} 頁已旋轉`);
-  if (ed.numbering) {
-    const fmt = ED_NUMBER_FORMATS.find((f) => f[0] === ed.numbering.fmt)[1];
-    parts.push(`蓋印頁碼：${fmt}，從第 ${ed.numbering.start_page} 頁開始`);
+function edSummaryLines() {
+  const t = ed.summary();
+  const lines = [`原始檔案 ${t.originalPages} 頁 → 輸出 ${t.outputPages} 頁`];
+  if (t.foreignPages) lines.push(`其中 ${t.foreignPages} 頁來自其他 PDF`);
+  if (t.rotatedPages) lines.push(`${t.rotatedPages} 頁已旋轉`);
+  if (t.numbering) {
+    const fmt = ED_NUMBER_FORMATS.find((f) => f[0] === t.numbering.fmt)[1];
+    lines.push(`蓋印頁碼：${fmt}，從第 ${t.numbering.startPage} 頁開始`);
   }
-  if (ed.stamps.length) parts.push(`蓋章：${ed.stamps.length} 個`);
-  if (ed.labels.length) parts.push(`頁碼標籤：${ed.labels.length} 條規則`);
-  if (ed.bookmarks.length) {
-    const lost = edBookmarksForExport().filter((b) => b.page < 0).length;
-    parts.push(`書籤：${ed.bookmarks.length} 個` + (lost ? `（其中 ${lost} 個沒有指向有效頁面）` : ""));
-  }
-  return parts;
+  if (t.stamps) lines.push(`蓋章：${t.stamps} 個`);
+  if (t.labelRules) lines.push(`頁碼標籤：${t.labelRules} 條規則`);
+  if (t.bookmarks) lines.push(`書籤：${t.bookmarks} 個` + (t.lostBookmarks ? `（其中 ${t.lostBookmarks} 個沒有指向有效頁面）` : ""));
+  return lines;
 }
-
-function edRecipe(outputName, overrides = {}) {
-  return {
-    pages: ed.pages.map((p) => ({ src: p.src, idx: p.idx, rot: p.rot })),
-    output_name: outputName,
-    page_labels: ed.labels,
-    page_numbers: ed.numbering,
-    bookmarks: edBookmarksForExport(),
-    stamps: edStampsForExport(),
-    ...overrides,
-  };
-}
-
-// Stamps limited to chosen pages are stored by page identity; the server wants output positions.
-function edStampsForExport() {
-  const position = new Map(ed.pages.map((p, i) => [p.uid, i]));
-  const out = [];
-  for (const st of ed.stamps) {
-    let pages = null;
-    if (st.scope.mode === "pages") {
-      pages = st.scope.uids.filter((u) => position.has(u)).map((u) => position.get(u));
-      if (!pages.length) continue; // every page it was meant for is gone
-    }
-    out.push({ file_id: st.file, name: st.name, cx: st.cx, cy: st.cy, w: st.w, rot: st.rot, opacity: st.opacity, pages });
-  }
-  return out;
-}
-
-// Bookmark targets are stored as page identities so reordering follows them; the server
-// needs the current 0-based position (-1 when the target page no longer exists).
-function edBookmarksForExport() {
-  const position = new Map(ed.pages.map((p, i) => [p.uid, i]));
-  return ed.bookmarks.map((b) => ({
-    level: b.level,
-    title: b.title,
-    page: b.target !== null && position.has(b.target) ? position.get(b.target) : -1,
-  }));
-}
-
-const edHasOverlays = () => !!ed.numbering || ed.stamps.length > 0;
 
 function edOpenExportDialog() {
   const base = ed.sources[ed.baseId];
@@ -1476,7 +1380,7 @@ function edOpenExportDialog() {
     body: h(
       "div",
       {},
-      h("div", { class: "summary" }, edSummary().map((t) => h("div", {}, t))),
+      h("div", { class: "summary" }, edSummaryLines().map((t) => h("div", {}, t))),
       h("label", { class: "field" }, "輸出檔名（不會覆寫原檔）", nameInput)
     ),
     actions: [
@@ -1510,7 +1414,7 @@ async function edExport(outputName) {
     const { job_id } = await apiFetch(`${API}/edit/export`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(edRecipe(outputName)),
+      body: JSON.stringify(ed.recipe(outputName)),
     });
     await watchJob(job_id, "edit", saveTarget);
   } catch (err) {
