@@ -321,6 +321,51 @@ function edOpenMoveDialog() {
   });
 }
 
+// ---------- delete pages ----------
+
+function edOpenDeleteDialog() {
+  const total = ed.pages.length;
+  const pos = ed.selectedPositions();
+  const input = h("input", { type: "text", value: pos.length ? edCompactRange(pos) : "", placeholder: "例如 5 或 5-7,9" });
+  const err = h("div", { class: "dialog-error" });
+  openModal({
+    title: "刪除頁面",
+    body: h(
+      "div",
+      {},
+      h("label", { class: "field" }, `要刪除的頁面（頁碼或範圍，共 ${total} 頁）`, input),
+      h("div", { class: "picker-info" }, "頁碼以目前畫面上的順序為準。刪除後可按「還原」復原。"),
+      err
+    ),
+    actions: [
+      { label: "取消" },
+      {
+        label: "刪除",
+        primary: true,
+        onClick: () => {
+          try {
+            ed.deletePages(edParseRange(input.value, total));
+          } catch (e) {
+            err.textContent = e.message;
+            return true;
+          }
+        },
+      },
+    ],
+  });
+}
+
+// Delete key: no confirmation, since undo brings the pages back.
+function edDeleteSelection() {
+  const pos = ed.selectedPositions();
+  if (!pos.length) return;
+  try {
+    ed.deletePages(pos);
+  } catch (e) {
+    showError(e.message);
+  }
+}
+
 // ---------- pick another PDF (shared by insert and, later, replace) ----------
 
 function edSourcePicker(onChange) {
@@ -1477,6 +1522,7 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("edit-move-btn").addEventListener("click", edOpenMoveDialog);
   document.getElementById("edit-insert-btn").addEventListener("click", edOpenInsertDialog);
   document.getElementById("edit-replace-btn").addEventListener("click", edOpenReplaceDialog);
+  document.getElementById("edit-delete-btn").addEventListener("click", edOpenDeleteDialog);
   document.getElementById("edit-numbering-btn").addEventListener("click", edOpenNumberingDialog);
   document.getElementById("edit-bookmark-btn").addEventListener("click", edOpenBookmarkDialog);
   document.getElementById("edit-stamp-btn").addEventListener("click", edOpenStampDialog);
@@ -1499,6 +1545,9 @@ document.addEventListener("DOMContentLoaded", () => {
     } else if (mod && e.key.toLowerCase() === "a") {
       e.preventDefault();
       edSelectAll();
+    } else if (e.key === "Delete" && !mod) {
+      e.preventDefault();
+      edDeleteSelection();
     }
   });
 });

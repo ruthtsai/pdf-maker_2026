@@ -480,3 +480,81 @@ test("a file stops being referenced once undo can no longer reach it", () => {
   assert.equal(s.referencesFile("other"), false);
   assert.deepEqual(s.referencedFiles(), ["base"]);
 });
+
+test("deletePages removes pages by current position as one undo step and clears the selection", () => {
+  const s = open();
+  s.movePages([5], 0);
+  s.select(uidsAt(s, 1, 2));
+  s.deletePages([1, 3]);
+  assert.deepEqual(order(s), [1, 3, 4]);
+  assert.deepEqual(s.selectedPositions(), []);
+  s.undo();
+  assert.deepEqual(order(s), [5, 1, 2, 3, 4]);
+});
+
+test("deleting every page is refused and changes nothing", () => {
+  const s = open({}, 2);
+  s.selectAll();
+  assert.throws(() => s.deletePages([1, 2]), /至少要保留一頁/);
+  assert.deepEqual(order(s), [1, 2]);
+  assert.equal(s.canUndo, false);
+  assert.deepEqual(s.selectedPositions(), [1, 2]);
+});
+
+test("references to a deleted page are kept, so undo brings everything back", () => {
+  const s = open({ toc: [{ level: 1, title: "Ch", page: 2 }] }, 3);
+  s.applyStamps([stamp(s.stampScope("current", [2]))]);
+  s.applyPageNumbers([rule(0), rule(2)], { ...DEFAULT_NUMBERING, start_page: 3 });
+  const before = s.recipe("x.pdf");
+  s.deletePages([2]);
+  s.undo();
+  assert.deepEqual(s.recipe("x.pdf"), before);
+});
+
+test("the recipe drops what pointed only at deleted pages", () => {
+  const s = open({ toc: [{ level: 1, title: "Ch", page: 2 }, { level: 1, title: "End", page: 3 }] }, 3);
+  s.applyStamps([stamp(s.stampScope("current", [2])), stamp(s.stampScope("range", [2, 3]), { id: 2 })]);
+  s.deletePages([2]);
+  const r = s.recipe("x.pdf");
+  assert.deepEqual(r.pages, [
+    { src: "base", idx: 0, rot: 0 },
+    { src: "base", idx: 2, rot: 0 },
+  ]);
+  assert.deepEqual(r.bookmarks, [
+    { level: 1, title: "Ch", page: -1 },
+    { level: 1, title: "End", page: 1 },
+  ]);
+  assert.deepEqual(r.stamps.map((st) => st.pages), [[1]]);
+  const t = s.summary();
+  assert.equal(t.outputPages, 2);
+  assert.equal(t.lostBookmarks, 1);
+  assert.equal(t.lostStamps, 1);
+});
+
+test("label rules starting past the new end are removed", () => {
+  const s = open({}, 5);
+  s.applyPageNumbers([rule(0), rule(2), rule(4)], null);
+  s.deletePages([1, 2]);
+  assert.deepEqual(s.labels.map((r) => r.start), [0, 2]);
+  assert.deepEqual(s.recipe("x.pdf").page_labels.map((r) => r.start), [0, 2]);
+  s.undo();
+  assert.deepEqual(s.labels.map((r) => r.start), [0, 2, 4]);
+});
+
+test("printed numbering starting past the new end moves to the new last page", () => {
+  const s = open({}, 5);
+  s.applyPageNumbers([], { ...DEFAULT_NUMBERING, start_page: 5 });
+  s.deletePages([4, 5]);
+  assert.equal(s.numbering.start_page, 3);
+  s.undo();
+  assert.equal(s.numbering.start_page, 5);
+  s.deletePages([1]);
+  assert.equal(s.numbering.start_page, 4);
+});
+
+test("printed numbering within the new page count is left alone", () => {
+  const s = open({}, 5);
+  s.applyPageNumbers([], { ...DEFAULT_NUMBERING, start_page: 2 });
+  s.deletePages([5]);
+  assert.equal(s.numbering.start_page, 2);
+});

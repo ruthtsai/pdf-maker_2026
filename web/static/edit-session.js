@@ -287,6 +287,22 @@ export function createEditSession(source, info) {
       commit();
     },
 
+    // Deletes pages `nums` (1-based, current numbering). Page-following references keep
+    // pointing at the deleted pages, so undo restores them; position references that
+    // would fall past the new end are pulled back inside it.
+    deletePages(nums) {
+      const total = pages.length;
+      const bad = nums.find((n) => !Number.isInteger(n) || n < 1 || n > total);
+      if (bad !== undefined) throw new Error(`頁碼需介於 1 到 ${total}`);
+      const doomed = new Set(nums.map((n) => pages[n - 1].uid));
+      if (doomed.size >= total) throw new Error("至少要保留一頁");
+      pages = pages.filter((p) => !doomed.has(p.uid));
+      labels = labels.filter((r) => r.start < pages.length);
+      if (numbering && numbering.start_page > pages.length) numbering = { ...numbering, start_page: pages.length };
+      select([]);
+      commit();
+    },
+
     insertPages(sourceId, nums, after) {
       const total = pages.length;
       if (!Number.isInteger(after) || after < 0 || after > total) throw new Error(`插入位置需介於 0 到 ${total}`);
