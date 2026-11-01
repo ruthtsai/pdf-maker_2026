@@ -9,6 +9,18 @@ let compressFile = null;
 
 // ---------- generic helpers ----------
 
+// The files each of these tabs still needs on the server, for the shared heartbeat
+// (heartbeat.js keeps them from being swept as idle).
+function appTabFiles() {
+  const one = (item) => (item ? [{ id: item.id, name: item.name }] : []);
+  return {
+    合併: mergeFiles.map((item) => ({ id: item.id, name: item.name })),
+    "PDF 轉影像": one(convertFile),
+    拆分: one(splitFile),
+    壓縮: one(compressFile),
+  };
+}
+
 function showError(message) {
   const toast = document.getElementById("error-toast");
   toast.textContent = message;

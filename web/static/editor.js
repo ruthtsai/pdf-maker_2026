@@ -6,6 +6,7 @@ import {
   shiftBookmarkLevel,
   stampScopeKind,
 } from "./edit-session.js";
+import { keepAlive } from "./heartbeat.js";
 import { h, openModal } from "./ui.js";
 
 // ---------- page editor ----------
@@ -13,9 +14,9 @@ import { h, openModal } from "./ui.js";
 
 const ED_BOX = 150; // thumbnail box (CSS px)
 const ED_THUMB_W = 280; // thumbnail image width requested from the server
-const ED_HEARTBEAT_MS = 5 * 60 * 1000; // the server sweeps files idle for 30 minutes
 
 let ed = null; // the current Edit Session; replaced whenever another file is opened
+let edOpened = null; // the file last opened in this tab, even before it could be edited
 let edDragUids = null; // uids being dragged while a reorder drag is active
 
 // ---------- geometry ----------
@@ -94,6 +95,7 @@ async function edOpenFile(file) {
 }
 
 function edShowOpened(item) {
+  edOpened = item;
   const info = document.getElementById("edit-info");
   info.innerHTML = "";
   info.classList.remove("hidden");
@@ -126,7 +128,7 @@ async function edStartSession(item) {
 
 // ---------- keeping files alive ----------
 // Reordering, rotating and bookmarks never reach the server, so the files the session
-// uses are reported regularly; otherwise the server would sweep them as idle.
+// uses go on the shared heartbeat; otherwise the server would sweep them as idle.
 
 function edFileName(id) {
   if (ed.sources[id]) return ed.sources[id].name;
@@ -134,22 +136,13 @@ function edFileName(id) {
   return st ? st.name : id;
 }
 
-async function edHeartbeat() {
-  if (!ed) return;
-  const session = ed;
-  let missing;
-  try {
-    ({ missing } = await apiFetch(`${API}/files/heartbeat`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ file_ids: session.referencedFiles() }),
-    }));
-  } catch {
-    return; // the server may be restarting; try again next time
-  }
-  if (session !== ed || !missing.length) return;
-  const names = missing.map(edFileName).join("、");
-  showError(`伺服器上已找不到這些檔案，編輯內容無法再匯出：${names}。請重新開啟檔案。`);
+// The files on the server this tab still needs: an opened file still waiting for its
+// password, and everything the Edit Session or its undo history uses.
+function edKeptFiles() {
+  const ids = new Set(ed ? ed.referencedFiles() : []);
+  const files = [...ids].map((id) => ({ id, name: edFileName(id) }));
+  if (edOpened && !ids.has(edOpened.id)) files.push({ id: edOpened.id, name: edOpened.name });
+  return files;
 }
 
 // ---------- rendering ----------
@@ -1530,7 +1523,7 @@ document.addEventListener("DOMContentLoaded", () => {
     btn.addEventListener("click", () => ed.rotate(Number(btn.dataset.rotate)));
   });
   edBindGridDrop();
-  setInterval(edHeartbeat, ED_HEARTBEAT_MS);
+  keepAlive.register("編輯頁面", edKeptFiles);
 
   document.addEventListener("keydown", (e) => {
     if (!ed || !document.getElementById("tab-edit").classList.contains("active") || edTypingInField(e)) return;

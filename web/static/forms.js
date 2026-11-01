@@ -1,3 +1,4 @@
+import { keepAlive } from "./heartbeat.js";
 import { h, openModal } from "./ui.js";
 
 // ---------- fill in a PDF form ----------
@@ -7,11 +8,14 @@ import { h, openModal } from "./ui.js";
 const FM_PAGE_W = 720; // displayed page width (CSS px)
 
 const fm = {
+  opened: null, // the file last opened, even while it still waits for its password
   file: null, // upload result
   info: null, // {pages, fields, has_xfa, is_form}
   values: {}, // widget id -> edited value (text / choice / checkbox)
   radios: {}, // radio group name -> chosen on-state ("" = none)
 };
+
+keepAlive.register("填寫表單", () => (fm.opened ? [{ id: fm.opened.id, name: fm.opened.name }] : []));
 
 const FM_TYPE_LABELS = { text: "文字", checkbox: "核取方塊", radio: "單選群組", combobox: "下拉選單", listbox: "清單" };
 
@@ -31,6 +35,7 @@ async function fmOpenFile(file) {
 }
 
 function fmShowOpened(item) {
+  fm.opened = item;
   const info = document.getElementById("form-info");
   info.innerHTML = "";
   info.classList.remove("hidden");
