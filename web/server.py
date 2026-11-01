@@ -18,10 +18,12 @@ from core.file_utils import ImageCorruptedError, PdfCorruptedError, PdfEncrypted
 from core.jobs import Job, JobStatus, job_manager
 from models.file_item import FileItem, FileStatus, FileType
 from web import store
-from web.editor_routes import router as editor_router
+from web.editor_routes import hold_or_404, router as editor_router
+from web.tool_routes import router as tool_router
 
 app = FastAPI(title="PDF／影像合併與轉換工具")
 app.include_router(editor_router)
+app.include_router(tool_router)
 
 # A PyInstaller onefile build extracts bundled data under sys._MEIPASS instead of
 # next to this .py file (which isn't a real file on disk once frozen).
@@ -55,6 +57,10 @@ class PasswordPayload(BaseModel):
     password: str
 
 
+class HeartbeatPayload(BaseModel):
+    file_ids: list[str]
+
+
 # ---------- helpers ----------
 
 
@@ -78,6 +84,7 @@ def _job_to_json(job: Job) -> dict:
         "total": job.total,
         "message": job.message,
         "warning": job.warning,
+        "details": job.details,
         "error": job.error,
     }
     if job.status == JobStatus.DONE and job.result is not None:
@@ -145,7 +152,7 @@ def unlock_file(file_id: str, payload: PasswordPayload):
     item.thumbnail_data_url = thumb
     item.status = FileStatus.OK
     item.error_message = None
-    store.passwords[file_id] = payload.password
+    store.set_password(file_id, payload.password)
 
     return _file_item_to_json(item)
 
@@ -156,18 +163,25 @@ def delete_file(file_id: str):
     return {"ok": True}
 
 
+@app.post("/api/files/heartbeat")
+def heartbeat(payload: HeartbeatPayload):
+    """Keeps the files an Edit Session still uses from being swept as idle."""
+    return {"missing": store.heartbeat(payload.file_ids)}
+
+
 # ---------- merge ----------
 
 
 @app.post("/api/merge")
 def start_merge(options: MergeOptions):
-    missing = [fid for fid in options.file_ids if fid not in store.files]
-    if missing:
-        raise HTTPException(400, detail=f"找不到檔案：{missing}")
     if not options.file_ids:
         raise HTTPException(400, detail="清單為空")
+    found = {fid: store.get(fid) for fid in options.file_ids}
+    missing = [fid for fid, item in found.items() if item is None]
+    if missing:
+        raise HTTPException(400, detail=f"找不到檔案：{missing}")
 
-    all_items = [store.files[fid] for fid in options.file_ids]
+    all_items = [found[fid] for fid in options.file_ids]
     items = [i for i in all_items if i.status == FileStatus.OK]
     skipped = [i for i in all_items if i.status != FileStatus.OK]
     if not items:
@@ -183,8 +197,8 @@ def start_merge(options: MergeOptions):
         names = "、".join(i.original_name for i in skipped)
         job.warning = f"已略過尚未就緒的檔案：{names}"
 
-    file_ids = [i.id for i in items]
-    store.mark_active(file_ids)
+    hold = hold_or_404([i.id for i in items])
+    passwords = {i.id: store.password(i.id) for i in items if store.password(i.id)}
 
     def task(job: Job):
         try:
@@ -193,14 +207,14 @@ def start_merge(options: MergeOptions):
                 output_path,
                 page_size=options.page_size,
                 image_fit=options.image_fit,
-                passwords=dict(store.passwords),
+                passwords=passwords,
                 progress_cb=job.progress_cb,
                 cancel_check=job.cancel_check,
             )
         except merger.MergeError as exc:
             raise RuntimeError(f"{exc.file_name}：{exc.message}") from exc
         finally:
-            store.unmark_active(file_ids)
+            hold.release()
 
     job_manager.run(job, task)
     return {"job_id": job.id}
@@ -211,7 +225,7 @@ def start_merge(options: MergeOptions):
 
 @app.post("/api/convert")
 def start_convert(options: ConvertOptions):
-    item = store.files.get(options.file_id)
+    item = store.get(options.file_id)
     if not item:
         raise HTTPException(404, detail="找不到檔案")
     if item.file_type != FileType.PDF:
@@ -233,7 +247,7 @@ def start_convert(options: ConvertOptions):
     if skipped:
         job.warning = f"已略過不存在的頁碼：{', '.join(map(str, skipped))}"
 
-    store.mark_active([item.id])
+    hold = hold_or_404([item.id])
 
     def task(job: Job):
         try:
@@ -246,12 +260,12 @@ def start_convert(options: ConvertOptions):
                 dpi=options.dpi,
                 jpg_quality=options.jpg_quality,
                 pack_zip=options.pack_zip,
-                password=store.passwords.get(item.id),
+                password=store.password(item.id),
                 progress_cb=job.progress_cb,
                 cancel_check=job.cancel_check,
             )
         finally:
-            store.unmark_active([item.id])
+            hold.release()
 
     job_manager.run(job, task)
     return {"job_id": job.id, "skipped_pages": skipped}

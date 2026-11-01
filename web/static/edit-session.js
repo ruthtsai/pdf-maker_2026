@@ -152,6 +152,18 @@ export function createEditSession(source, info) {
     }));
   }
 
+  // Every file the document, or any state undo can reach, still uses: page sources
+  // and stamp images. These must stay on the server while the session is open.
+  function referencedFiles() {
+    const ids = new Set();
+    for (const snap of history) {
+      const s = JSON.parse(snap);
+      s.pages.forEach((p) => ids.add(p.src));
+      s.stamps.forEach((st) => ids.add(st.file));
+    }
+    return [...ids];
+  }
+
   return {
     get sources() {
       return sources;
@@ -234,13 +246,8 @@ export function createEditSession(source, info) {
       delete sources[id];
     },
 
-    // Whether the document, or any state undo can reach, still uses this file.
-    referencesFile(id) {
-      return history.some((snap) => {
-        const s = JSON.parse(snap);
-        return s.pages.some((p) => p.src === id) || s.stamps.some((st) => st.file === id);
-      });
-    },
+    referencedFiles,
+    referencesFile: (id) => referencedFiles().includes(id),
 
     // Moves the pages `uids` (kept in their current relative order) next to `targetUid`;
     // targetUid === null means "to the very end".
@@ -277,6 +284,22 @@ export function createEditSession(source, info) {
       const at = target ? rest.findIndex((p) => p.uid === target.uid) + 1 : 0;
       pages = [...rest.slice(0, at), ...moving, ...rest.slice(at)];
       select(moving.map((p) => p.uid));
+      commit();
+    },
+
+    // Deletes pages `nums` (1-based, current numbering). Page-following references keep
+    // pointing at the deleted pages, so undo restores them; position references that
+    // would fall past the new end are pulled back inside it.
+    deletePages(nums) {
+      const total = pages.length;
+      const bad = nums.find((n) => !Number.isInteger(n) || n < 1 || n > total);
+      if (bad !== undefined) throw new Error(`頁碼需介於 1 到 ${total}`);
+      const doomed = new Set(nums.map((n) => pages[n - 1].uid));
+      if (doomed.size >= total) throw new Error("至少要保留一頁");
+      pages = pages.filter((p) => !doomed.has(p.uid));
+      labels = labels.filter((r) => r.start < pages.length);
+      if (numbering && numbering.start_page > pages.length) numbering = { ...numbering, start_page: pages.length };
+      select([]);
       commit();
     },
 

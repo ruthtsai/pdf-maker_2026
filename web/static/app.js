@@ -4,8 +4,22 @@ const PAGE_RANGE_RE = /^(\d+(-\d+)?)(,\s*\d+(-\d+)?)*$/;
 
 let mergeFiles = [];
 let convertFile = null;
+let splitFile = null;
+let compressFile = null;
 
 // ---------- generic helpers ----------
+
+// The files each of these tabs still needs on the server, for the shared heartbeat
+// (heartbeat.js keeps them from being swept as idle).
+function appTabFiles() {
+  const one = (item) => (item ? [{ id: item.id, name: item.name }] : []);
+  return {
+    合併: mergeFiles.map((item) => ({ id: item.id, name: item.name })),
+    "PDF 轉影像": one(convertFile),
+    拆分: one(splitFile),
+    壓縮: one(compressFile),
+  };
+}
 
 function showError(message) {
   const toast = document.getElementById("error-toast");
@@ -181,6 +195,7 @@ function showResultError(prefix, message) {
   area.textContent = `處理失敗：${message}`;
 }
 
+// Resolves with the finished job (null if its status could not be read).
 function watchJob(jobId, prefix, saveTarget) {
   const cancelBtn = document.querySelector(`#${prefix}-progress .btn-cancel`);
   cancelBtn.onclick = () =>
@@ -194,7 +209,7 @@ function watchJob(jobId, prefix, saveTarget) {
       } catch (err) {
         hideProgress(prefix);
         showError(`查詢工作狀態失敗：${err.message}`);
-        resolve();
+        resolve(null);
         return;
       }
       if (job.status === "pending" || job.status === "running") {
@@ -220,7 +235,7 @@ function watchJob(jobId, prefix, saveTarget) {
       } else {
         showResultError(prefix, job.error || "處理失敗");
       }
-      resolve();
+      resolve(job);
     };
     poll();
   });
@@ -441,58 +456,70 @@ async function startMerge() {
   }
 }
 
-// ---------- convert tab ----------
+// ---------- single-PDF tabs (convert, split, ...) ----------
 
-async function handleConvertFile(fileList) {
+// Uploads the first dropped file, which must be a PDF; returns the file item or null.
+async function uploadSinglePdf(fileList) {
   const file = fileList[0];
-  if (!file) return;
+  if (!file) return null;
   if (!file.name.toLowerCase().endsWith(".pdf")) {
     showError("請選擇 PDF 檔案");
-    return;
+    return null;
   }
   const form = new FormData();
   form.append("file", file);
   try {
-    const item = await apiFetch(`${API}/upload`, { method: "POST", body: form });
-    convertFile = item;
-    renderConvertInfo();
+    return await apiFetch(`${API}/upload`, { method: "POST", body: form });
   } catch (err) {
     showError(`上傳失敗：${err.message}`);
+    return null;
   }
 }
 
-function renderConvertInfo() {
-  const info = document.getElementById("convert-info");
+// Shows a tab's file (with the unlock row when it has a password) and enables its start button.
+function renderPdfInfo(prefix, item, onUpdated) {
+  const info = document.getElementById(`${prefix}-info`);
   info.classList.remove("hidden");
   info.innerHTML = "";
 
   const nameEl = document.createElement("div");
-  nameEl.textContent = `檔名：${convertFile.name}`;
+  nameEl.textContent = `檔名：${item.name}`;
   info.appendChild(nameEl);
 
-  if (convertFile.status === "encrypted") {
+  if (item.status === "encrypted") {
     const warn = document.createElement("div");
     warn.className = "file-error-msg";
-    warn.textContent = convertFile.error_message || "PDF 有密碼保護";
+    warn.textContent = item.error_message || "PDF 有密碼保護";
     info.appendChild(warn);
-    info.appendChild(
-      buildUnlockRow(convertFile.id, (updated) => {
-        convertFile = updated;
-        renderConvertInfo();
-      })
-    );
-  } else if (convertFile.status === "error") {
+    info.appendChild(buildUnlockRow(item.id, onUpdated));
+  } else if (item.status === "error") {
     const err = document.createElement("div");
     err.className = "file-error-msg";
-    err.textContent = convertFile.error_message || "檔案錯誤";
+    err.textContent = item.error_message || "檔案錯誤";
     info.appendChild(err);
   } else {
     const pages = document.createElement("div");
-    pages.textContent = `總頁數：${convertFile.page_count}`;
+    pages.textContent = `總頁數：${item.page_count}`;
     info.appendChild(pages);
   }
 
-  document.getElementById("convert-start-btn").disabled = convertFile.status !== "ok";
+  document.getElementById(`${prefix}-start-btn`).disabled = item.status !== "ok";
+}
+
+// ---------- convert tab ----------
+
+async function handleConvertFile(fileList) {
+  const item = await uploadSinglePdf(fileList);
+  if (!item) return;
+  convertFile = item;
+  renderConvertInfo();
+}
+
+function renderConvertInfo() {
+  renderPdfInfo("convert", convertFile, (updated) => {
+    convertFile = updated;
+    renderConvertInfo();
+  });
 }
 
 function validatePageRangeInput(e) {
@@ -567,6 +594,155 @@ async function startConvert() {
   }
 }
 
+// ---------- split tab ----------
+
+async function handleSplitFile(fileList) {
+  const item = await uploadSinglePdf(fileList);
+  if (!item) return;
+  splitFile = item;
+  renderSplitInfo();
+}
+
+function renderSplitInfo() {
+  renderPdfInfo("split", splitFile, (updated) => {
+    splitFile = updated;
+    renderSplitInfo();
+  });
+}
+
+function splitOptions() {
+  const mode = document.getElementById("opt-split-mode").value;
+  if (mode === "every") {
+    const every = Number(document.getElementById("opt-split-every").value);
+    if (!Number.isInteger(every) || every < 1) throw new Error("每份頁數需為大於等於 1 的整數");
+    return { mode, every };
+  }
+  const ranges = document.getElementById("opt-split-ranges").value.trim();
+  if (!ranges) throw new Error("請輸入頁碼範圍，例如 1-3;4;5-8"); // the server checks the rest
+  return { mode, ranges };
+}
+
+// The output's name is only known once the server has read the ranges, so the save
+// location is asked for after the job has started; cancelling the dialog cancels the job.
+async function pickSaveTarget(fileName, jobId) {
+  const zip = fileName.toLowerCase().endsWith(".zip");
+  try {
+    const handle = await window.showSaveFilePicker({
+      suggestedName: fileName,
+      types: zip
+        ? [{ description: "ZIP", accept: { "application/zip": [".zip"] } }]
+        : [{ description: "PDF", accept: { "application/pdf": [".pdf"] } }],
+    });
+    return { type: "file", handle };
+  } catch (err) {
+    if (err.name === "AbortError") {
+      await apiFetch(`${API}/jobs/${jobId}/cancel`, { method: "POST" }).catch(() => {});
+      return "cancelled";
+    }
+    showError(`無法選擇儲存位置，完成後請改用下載連結：${err.message}`);
+    return null;
+  }
+}
+
+async function startSplit() {
+  if (!splitFile) return;
+  let options;
+  try {
+    options = splitOptions();
+  } catch (err) {
+    showError(err.message);
+    return;
+  }
+  const btn = document.getElementById("split-start-btn");
+  btn.disabled = true;
+  hideResult("split-result");
+  try {
+    const { job_id, file_name } = await apiFetch(`${API}/split`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ file_id: splitFile.id, ...options }),
+    });
+    let saveTarget = null;
+    if (document.getElementById("split-save-as").checked && saveAsSupported()) {
+      saveTarget = await pickSaveTarget(file_name, job_id);
+      if (saveTarget === "cancelled") return;
+    }
+    await watchJob(job_id, "split", saveTarget);
+  } catch (err) {
+    showError(`拆分失敗：${err.message}`);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ---------- compress tab ----------
+
+async function handleCompressFile(fileList) {
+  const item = await uploadSinglePdf(fileList);
+  if (!item) return;
+  compressFile = item;
+  renderCompressInfo();
+}
+
+function renderCompressInfo() {
+  renderPdfInfo("compress", compressFile, (updated) => {
+    compressFile = updated;
+    renderCompressInfo();
+  });
+}
+
+function formatBytes(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(2)} MB`;
+}
+
+function showCompressSizes(details) {
+  const line = document.createElement("div");
+  line.style.marginBottom = "8px";
+  line.style.fontWeight = "600";
+  line.textContent = details.compressed
+    ? `原始大小 ${formatBytes(details.original_size)} → 壓縮後 ${formatBytes(details.compressed_size)}，節省 ${(details.saved_ratio * 100).toFixed(1)}%`
+    : `原始大小 ${formatBytes(details.original_size)}，壓縮後沒有變小`;
+  document.getElementById("compress-result").prepend(line);
+}
+
+async function startCompress() {
+  if (!compressFile) return;
+  const btn = document.getElementById("compress-start-btn");
+
+  let saveTarget = null;
+  if (document.getElementById("compress-save-as").checked && saveAsSupported()) {
+    try {
+      const handle = await window.showSaveFilePicker({
+        suggestedName: `${compressFile.name.replace(/\.pdf$/i, "")}_compressed.pdf`,
+        types: [{ description: "PDF", accept: { "application/pdf": [".pdf"] } }],
+      });
+      saveTarget = { type: "file", handle };
+    } catch (err) {
+      if (err.name === "AbortError") return;
+      showError(`無法選擇儲存位置：${err.message}`);
+      return;
+    }
+  }
+
+  btn.disabled = true;
+  hideResult("compress-result");
+  try {
+    const { job_id } = await apiFetch(`${API}/compress`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ file_id: compressFile.id, level: document.getElementById("opt-compress-level").value }),
+    });
+    const job = await watchJob(job_id, "compress", saveTarget);
+    if (job && job.status === "done" && job.details) showCompressSizes(job.details);
+  } catch (err) {
+    showError(`壓縮失敗：${err.message}`);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 // ---------- init ----------
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -575,6 +751,8 @@ document.addEventListener("DOMContentLoaded", () => {
   if (saveAsSupported()) {
     document.getElementById("merge-save-as-row").classList.remove("hidden");
     document.getElementById("convert-save-as-row").classList.remove("hidden");
+    document.getElementById("split-save-as-row").classList.remove("hidden");
+    document.getElementById("compress-save-as-row").classList.remove("hidden");
   }
 
   setupDropzone(
@@ -590,7 +768,26 @@ document.addEventListener("DOMContentLoaded", () => {
     handleConvertFile
   );
 
+  setupDropzone(
+    document.getElementById("split-dropzone"),
+    document.getElementById("split-file-input"),
+    document.getElementById("split-add-btn"),
+    handleSplitFile
+  );
+
   document.getElementById("merge-start-btn").addEventListener("click", startMerge);
+  document.getElementById("split-start-btn").addEventListener("click", startSplit);
+  setupDropzone(
+    document.getElementById("compress-dropzone"),
+    document.getElementById("compress-file-input"),
+    document.getElementById("compress-add-btn"),
+    handleCompressFile
+  );
+  document.getElementById("compress-start-btn").addEventListener("click", startCompress);
+  document.getElementById("opt-split-mode").addEventListener("change", (e) => {
+    document.getElementById("opt-split-ranges-label").classList.toggle("hidden", e.target.value !== "ranges");
+    document.getElementById("opt-split-every-label").classList.toggle("hidden", e.target.value !== "every");
+  });
   document.getElementById("convert-start-btn").addEventListener("click", startConvert);
 
   document.getElementById("opt-format").addEventListener("change", (e) => {

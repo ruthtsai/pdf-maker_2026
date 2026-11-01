@@ -1,5 +1,4 @@
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 
 
@@ -26,4 +25,4 @@ class FileItem:
     status: FileStatus = FileStatus.OK
     error_message: str | None = None
     thumbnail_data_url: str | None = None
-    touched_at: float = field(default_factory=time.time)
+    touched_at: float = 0.0  # last activity, set by web.store's clock

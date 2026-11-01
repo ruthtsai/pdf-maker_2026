@@ -1,5 +1,5 @@
 pypdf>=4.0
-PyMuPDF>=1.24
+PyMuPDF>=1.28.2
 Pillow>=10.0
 img2pdf>=0.5
 fastapi>=0.110

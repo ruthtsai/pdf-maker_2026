@@ -6,6 +6,7 @@ import {
   shiftBookmarkLevel,
   stampScopeKind,
 } from "./edit-session.js";
+import { keepAlive } from "./heartbeat.js";
 import { h, openModal } from "./ui.js";
 
 // ---------- page editor ----------
@@ -15,6 +16,10 @@ const ED_BOX = 150; // thumbnail box (CSS px)
 const ED_THUMB_W = 280; // thumbnail image width requested from the server
 
 let ed = null; // the current Edit Session; replaced whenever another file is opened
+let edOpened = null; // the file last opened in this tab, even before it could be edited
+// Files uploaded in an open dialog and not applied yet (id -> name); the dialog drops
+// them when it closes, after which only the Edit Session keeps what it uses.
+const edDialogUploads = new Map();
 let edDragUids = null; // uids being dragged while a reorder drag is active
 
 // ---------- geometry ----------
@@ -93,6 +98,7 @@ async function edOpenFile(file) {
 }
 
 function edShowOpened(item) {
+  edOpened = item;
   const info = document.getElementById("edit-info");
   info.innerHTML = "";
   info.classList.remove("hidden");
@@ -121,6 +127,27 @@ async function edStartSession(item) {
   document.getElementById("edit-workspace").classList.remove("hidden");
   edRender();
   previous.filter((id) => id !== item.id).forEach((id) => apiFetch(`${API}/files/${id}`, { method: "DELETE" }).catch(() => {}));
+}
+
+// ---------- keeping files alive ----------
+// Reordering, rotating and bookmarks never reach the server, so the files the session
+// uses go on the shared heartbeat; otherwise the server would sweep them as idle.
+
+function edFileName(id) {
+  if (ed.sources[id]) return ed.sources[id].name;
+  const st = ed.stamps.find((s) => s.file === id);
+  return st ? st.name : id;
+}
+
+// The files on the server this tab still needs: an opened file still waiting for its
+// password, files uploaded in a dialog that is still open, and everything the Edit
+// Session or its undo history uses.
+function edKeptFiles() {
+  const ids = new Set(ed ? ed.referencedFiles() : []);
+  const files = [...ids].map((id) => ({ id, name: edFileName(id) }));
+  if (edOpened && !ids.has(edOpened.id)) files.push({ id: edOpened.id, name: edOpened.name });
+  for (const [id, name] of edDialogUploads) if (!ids.has(id)) files.push({ id, name });
+  return files;
 }
 
 // ---------- rendering ----------
@@ -292,6 +319,51 @@ function edOpenMoveDialog() {
   });
 }
 
+// ---------- delete pages ----------
+
+function edOpenDeleteDialog() {
+  const total = ed.pages.length;
+  const pos = ed.selectedPositions();
+  const input = h("input", { type: "text", value: pos.length ? edCompactRange(pos) : "", placeholder: "例如 5 或 5-7,9" });
+  const err = h("div", { class: "dialog-error" });
+  openModal({
+    title: "刪除頁面",
+    body: h(
+      "div",
+      {},
+      h("label", { class: "field" }, `要刪除的頁面（頁碼或範圍，共 ${total} 頁）`, input),
+      h("div", { class: "picker-info" }, "頁碼以目前畫面上的順序為準。刪除後可按「還原」復原。"),
+      err
+    ),
+    actions: [
+      { label: "取消" },
+      {
+        label: "刪除",
+        primary: true,
+        onClick: () => {
+          try {
+            ed.deletePages(edParseRange(input.value, total));
+          } catch (e) {
+            err.textContent = e.message;
+            return true;
+          }
+        },
+      },
+    ],
+  });
+}
+
+// Delete key: no confirmation, since undo brings the pages back.
+function edDeleteSelection() {
+  const pos = ed.selectedPositions();
+  if (!pos.length) return;
+  try {
+    ed.deletePages(pos);
+  } catch (e) {
+    showError(e.message);
+  }
+}
+
 // ---------- pick another PDF (shared by insert and, later, replace) ----------
 
 function edSourcePicker(onChange) {
@@ -330,6 +402,7 @@ function edSourcePicker(onChange) {
     try {
       const item = await apiFetch(`${API}/upload`, { method: "POST", body: form });
       uploaded.push(item.id);
+      edDialogUploads.set(item.id, item.name);
       await handle(item);
     } catch (err) {
       info.textContent = `上傳失敗：${err.message}`;
@@ -344,6 +417,7 @@ function edSourcePicker(onChange) {
     // Files uploaded for a dialog that never made it into the document are discarded.
     cleanup() {
       uploaded.forEach((id) => {
+        edDialogUploads.delete(id);
         if (ed.referencesFile(id)) return;
         ed.forgetSource(id);
         apiFetch(`${API}/files/${id}`, { method: "DELETE" }).catch(() => {});
@@ -1177,6 +1251,7 @@ function edOpenStampDialog() {
     try {
       const item = await apiFetch(`${API}/upload`, { method: "POST", body: form });
       uploaded.push(item.id);
+      edDialogUploads.set(item.id, item.name);
       if (item.status !== "ok" || item.type !== "image") {
         err.textContent = item.error_message || "無法使用這個檔案";
         return;
@@ -1261,6 +1336,7 @@ function edOpenStampDialog() {
       if (objectUrl) URL.revokeObjectURL(objectUrl);
       // images uploaded in this dialog that ended up unused are discarded again
       uploaded.forEach((id) => {
+        edDialogUploads.delete(id);
         if (ed.referencesFile(id)) return;
         apiFetch(`${API}/files/${id}`, { method: "DELETE" }).catch(() => {});
       });
@@ -1448,6 +1524,7 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("edit-move-btn").addEventListener("click", edOpenMoveDialog);
   document.getElementById("edit-insert-btn").addEventListener("click", edOpenInsertDialog);
   document.getElementById("edit-replace-btn").addEventListener("click", edOpenReplaceDialog);
+  document.getElementById("edit-delete-btn").addEventListener("click", edOpenDeleteDialog);
   document.getElementById("edit-numbering-btn").addEventListener("click", edOpenNumberingDialog);
   document.getElementById("edit-bookmark-btn").addEventListener("click", edOpenBookmarkDialog);
   document.getElementById("edit-stamp-btn").addEventListener("click", edOpenStampDialog);
@@ -1455,6 +1532,7 @@ document.addEventListener("DOMContentLoaded", () => {
     btn.addEventListener("click", () => ed.rotate(Number(btn.dataset.rotate)));
   });
   edBindGridDrop();
+  keepAlive.register("編輯頁面", edKeptFiles);
 
   document.addEventListener("keydown", (e) => {
     if (!ed || !document.getElementById("tab-edit").classList.contains("active") || edTypingInField(e)) return;
@@ -1469,6 +1547,9 @@ document.addEventListener("DOMContentLoaded", () => {
     } else if (mod && e.key.toLowerCase() === "a") {
       e.preventDefault();
       edSelectAll();
+    } else if (e.key === "Delete" && !mod) {
+      e.preventDefault();
+      edDeleteSelection();
     }
   });
 });

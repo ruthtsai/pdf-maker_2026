@@ -16,6 +16,8 @@
 <nav class="tabs">
   <button class="tab-btn active" data-tab="merge">合併</button>
   <button class="tab-btn" data-tab="convert">PDF 轉影像</button>
+  <button class="tab-btn" data-tab="split">拆分</button>
+  <button class="tab-btn" data-tab="compress">壓縮</button>
   <button class="tab-btn" data-tab="edit">編輯頁面</button>
   <button class="tab-btn" data-tab="form">填寫表單</button>
 </nav>
@@ -117,6 +119,85 @@
     <div id="convert-result" class="result-area hidden"></div>
   </section>
 
+  <!-- ============ 拆分頁籤 ============ -->
+  <section id="tab-split" class="tab-panel">
+    <div class="dropzone" id="split-dropzone">
+      <p>拖曳要拆分的 PDF 到這裡，或</p>
+      <button id="split-add-btn" class="btn">選擇 PDF</button>
+      <input id="split-file-input" type="file" accept=".pdf" hidden />
+    </div>
+
+    <div id="split-info" class="pdf-info hidden"></div>
+
+    <div class="options-row">
+      <label>拆分方式
+        <select id="opt-split-mode">
+          <option value="ranges">依範圍</option>
+          <option value="every">每 N 頁</option>
+        </select>
+      </label>
+      <label id="opt-split-ranges-label">頁碼範圍（以分號分隔，每組輸出一個 PDF，例如 1-3;4;5-8）
+        <input id="opt-split-ranges" type="text" placeholder="1-3;4;5-8" />
+      </label>
+      <label id="opt-split-every-label" class="hidden">每幾頁一份
+        <input id="opt-split-every" type="number" min="1" value="1" />
+      </label>
+    </div>
+
+    <div class="action-row">
+      <button id="split-start-btn" class="btn btn-primary" disabled>開始拆分</button>
+      <label id="split-save-as-row" class="save-as-toggle hidden">
+        <input id="split-save-as" type="checkbox" />
+        另存為（選擇儲存位置）
+      </label>
+    </div>
+
+    <div id="split-progress" class="progress-area hidden">
+      <div class="progress-bar"><div class="progress-bar-fill"></div></div>
+      <span class="progress-label"></span>
+      <button class="btn btn-cancel">取消</button>
+    </div>
+
+    <div id="split-result" class="result-area hidden"></div>
+  </section>
+
+  <!-- ============ 壓縮頁籤 ============ -->
+  <section id="tab-compress" class="tab-panel">
+    <div class="dropzone" id="compress-dropzone">
+      <p>拖曳要壓縮的 PDF 到這裡，或</p>
+      <button id="compress-add-btn" class="btn">選擇 PDF</button>
+      <input id="compress-file-input" type="file" accept=".pdf" hidden />
+    </div>
+
+    <div id="compress-info" class="pdf-info hidden"></div>
+
+    <div class="options-row">
+      <label>壓縮等級
+        <select id="opt-compress-level">
+          <option value="light">輕度：無損整理，不動影像</option>
+          <option value="standard" selected>標準：影像降到 150 DPI、JPEG 品質 75</option>
+          <option value="strong">強力：影像降到 100 DPI、JPEG 品質 60</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="action-row">
+      <button id="compress-start-btn" class="btn btn-primary" disabled>開始壓縮</button>
+      <label id="compress-save-as-row" class="save-as-toggle hidden">
+        <input id="compress-save-as" type="checkbox" />
+        另存為（選擇儲存位置）
+      </label>
+    </div>
+
+    <div id="compress-progress" class="progress-area hidden">
+      <div class="progress-bar"><div class="progress-bar-fill"></div></div>
+      <span class="progress-label"></span>
+      <button class="btn btn-cancel">取消</button>
+    </div>
+
+    <div id="compress-result" class="result-area hidden"></div>
+  </section>
+
   <!-- ============ 編輯頁面頁籤 ============ -->
   <section id="tab-edit" class="tab-panel">
     <div id="edit-dropzone" class="dropzone">
@@ -144,6 +225,7 @@
           <button class="btn" id="edit-move-btn">移動頁面…</button>
           <button class="btn" id="edit-insert-btn">插入 PDF…</button>
           <button class="btn" id="edit-replace-btn">取代頁面…</button>
+          <button class="btn" id="edit-delete-btn" title="刪除選取的頁面 (Delete)">刪除頁面…</button>
         </span>
         <span class="toolbar-sep"></span>
         <span class="toolbar-group">
@@ -165,7 +247,7 @@
         </label>
         <button class="btn btn-primary" id="edit-export-btn">匯出新檔…</button>
       </div>
-      <p class="edit-hint">點一下選取；Ctrl 複選、Shift 連選；拖曳縮圖可重新排序（多選時一起移動）；雙擊或按放大鏡預覽單頁。所有操作都只會輸出新檔，不會改動原檔。</p>
+      <p class="edit-hint">點一下選取；Ctrl 複選、Shift 連選；拖曳縮圖可重新排序（多選時一起移動）；按 Delete 刪除選取的頁面；雙擊或按放大鏡預覽單頁。所有操作都只會輸出新檔，不會改動原檔。</p>
       <div id="edit-grid" class="page-grid"></div>
     </div>
 
