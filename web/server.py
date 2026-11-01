@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import mimetypes
 import sys
 import uuid
 from pathlib import Path
@@ -301,4 +302,6 @@ async def unhandled_exception_handler(request, exc):
     return JSONResponse(status_code=500, content={"detail": str(exc)})
 
 
+# ES modules need a JavaScript MIME type, and on Windows the registry can override it.
+mimetypes.add_type("text/javascript", ".js")
 app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")

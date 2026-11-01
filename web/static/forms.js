@@ -1,3 +1,5 @@
+import { h, openModal } from "./ui.js";
+
 // ---------- fill in a PDF form ----------
 // Independent of the page editor: one PDF in, one new PDF out. Fields are detected on the
 // server; here each field becomes a live input laid over a picture of its page.
