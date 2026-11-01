@@ -1,30 +1,14 @@
+import { createEditSession } from "./edit-session.js";
 import { h, openModal } from "./ui.js";
 
 // ---------- page editor ----------
-// The document being edited is just an ordered list of page references
-// ({src file, page index, extra rotation}). Every operation edits that list;
-// a new PDF is only built on the server when the user exports.
+// The view of the Edit Session: everything on screen, and every server request.
 
 const ED_BOX = 150; // thumbnail box (CSS px)
 const ED_THUMB_W = 280; // thumbnail image width requested from the server
-const ED_HISTORY_LIMIT = 100;
 
-const ed = {
-  sources: {}, // fileId -> {id, name, page_count, status, pages:[{w,h,rotation}]}
-  baseId: null,
-  pages: [], // [{uid, src, idx, rot}]
-  labels: [], // page-label rules [{start (0-based), style, prefix, first}]
-  bookmarks: [], // outline entries [{id, level, title, target (page uid | null)}]
-  nextBookmarkId: 1,
-  stamps: [], // image stamps [{id, file, name, cx, cy, w, rot, opacity, scope:{mode:"all"}|{mode:"pages",uids}}]
-  numbering: null, // printed page numbers {v_pos,h_pos,fmt,start_page,start_number,font_size,margin} | null
-  selection: new Set(), // uids
-  anchor: null, // uid used as the start of a Shift range
-  nextUid: 1,
-  history: [], // JSON snapshots of the document state
-  hIndex: -1,
-  dragUids: null, // uids being dragged while a reorder drag is active
-};
+let ed = null; // the current Edit Session; replaced whenever another file is opened
+let edDragUids = null; // uids being dragged while a reorder drag is active
 
 // ---------- geometry ----------
 
@@ -47,10 +31,6 @@ function edFit(page, boxW, boxH) {
 
 function edImageUrl(page, width) {
   return `${API}/files/${page.src}/pages/${page.idx}/image?w=${width}`;
-}
-
-function edPositionOf(uid) {
-  return ed.pages.findIndex((p) => p.uid === uid);
 }
 
 // "5-7,9" -> [5,6,7,9] (1-based, sorted, unique). Throws Error with a user-facing message.
@@ -81,71 +61,9 @@ function edCompactRange(nums) {
   return out.join(",");
 }
 
-function edSelectedPositions() {
-  return ed.pages.map((p, i) => (ed.selection.has(p.uid) ? i + 1 : 0)).filter(Boolean);
-}
-
-// ---------- history (undo / redo) ----------
-
-function edSnapshot() {
-  return JSON.stringify({
-    pages: ed.pages,
-    labels: ed.labels,
-    numbering: ed.numbering,
-    bookmarks: ed.bookmarks,
-    stamps: ed.stamps,
-  });
-}
-
 function edUpdateHistoryButtons() {
-  document.getElementById("edit-undo").disabled = ed.hIndex <= 0;
-  document.getElementById("edit-redo").disabled = ed.hIndex >= ed.history.length - 1;
-}
-
-function edResetHistory() {
-  ed.history = [edSnapshot()];
-  ed.hIndex = 0;
-  edUpdateHistoryButtons();
-}
-
-// Call after every document mutation.
-function edCommit() {
-  ed.history.length = ed.hIndex + 1;
-  ed.history.push(edSnapshot());
-  if (ed.history.length > ED_HISTORY_LIMIT) ed.history.shift();
-  ed.hIndex = ed.history.length - 1;
-  edUpdateHistoryButtons();
-  edRender();
-}
-
-function edGoto(index) {
-  if (index < 0 || index >= ed.history.length) return;
-  ed.hIndex = index;
-  const snap = JSON.parse(ed.history[index]);
-  ed.pages = snap.pages;
-  ed.labels = snap.labels;
-  ed.numbering = snap.numbering;
-  ed.bookmarks = snap.bookmarks;
-  ed.stamps = snap.stamps || [];
-  const alive = new Set(ed.pages.map((p) => p.uid));
-  ed.selection = new Set([...ed.selection].filter((u) => alive.has(u)));
-  edUpdateHistoryButtons();
-  edRender();
-}
-
-const edUndo = () => edGoto(ed.hIndex - 1);
-const edRedo = () => edGoto(ed.hIndex + 1);
-
-// ---------- session ----------
-
-function edNewPage(src, idx, rot = 0) {
-  return { uid: ed.nextUid++, src, idx, rot };
-}
-
-async function edLoadInfo(fileId) {
-  const info = await apiFetch(`${API}/files/${fileId}/info`);
-  ed.sources[fileId].pages = info.pages;
-  return info;
+  document.getElementById("edit-undo").disabled = !ed.canUndo;
+  document.getElementById("edit-redo").disabled = !ed.canRedo;
 }
 
 async function edOpenFile(file) {
@@ -154,7 +72,7 @@ async function edOpenFile(file) {
     showError("請選擇 PDF 檔案");
     return;
   }
-  if (ed.history.length > 1 && !confirm("目前的編輯內容尚未匯出，確定要改開另一個檔案嗎？")) return;
+  if (ed && ed.edited && !confirm("目前的編輯內容尚未匯出，確定要改開另一個檔案嗎？")) return;
   const form = new FormData();
   form.append("file", file);
   let item;
@@ -188,30 +106,10 @@ function edShowOpened(item) {
 }
 
 async function edStartSession(item) {
-  const previous = Object.keys(ed.sources);
-  ed.sources = { [item.id]: { id: item.id, name: item.name, page_count: item.page_count, status: item.status, pages: null } };
-  ed.baseId = item.id;
-  const info = await edLoadInfo(item.id);
-  ed.nextUid = 1;
-  ed.pages = Array.from({ length: item.page_count }, (_, i) => edNewPage(item.id, i));
-  ed.labels = (info.labels || []).map((l) => ({
-    start: l.startpage || 0,
-    style: l.style || "",
-    prefix: l.prefix || "",
-    first: l.firstpagenum || 1,
-  }));
-  ed.numbering = null;
-  ed.stamps = [];
-  ed.nextBookmarkId = 1;
-  ed.bookmarks = (info.toc || []).map((t) => ({
-    id: ed.nextBookmarkId++,
-    level: t.level,
-    title: t.title,
-    target: t.page >= 1 && t.page <= item.page_count ? ed.pages[t.page - 1].uid : null,
-  }));
-  ed.selection = new Set();
-  ed.anchor = null;
-  edResetHistory();
+  const info = await apiFetch(`${API}/files/${item.id}/info`);
+  const previous = ed ? Object.keys(ed.sources) : [];
+  ed = createEditSession(item, info);
+  ed.subscribe(edRender);
   hideResult("edit-result");
   document.getElementById("edit-workspace").classList.remove("hidden");
   edRender();
@@ -259,27 +157,13 @@ function edRender() {
   grid.innerHTML = "";
   ed.pages.forEach((page, i) => grid.append(edBuildCell(page, i)));
   edUpdateStatus();
-  document.dispatchEvent(new CustomEvent("editor:rendered"));
+  edUpdateHistoryButtons();
 }
 
 // ---------- selection ----------
 
 function edHandleClick(e, uid) {
-  const toggle = e.ctrlKey || e.metaKey;
-  if (e.shiftKey && ed.anchor !== null && edPositionOf(ed.anchor) >= 0) {
-    const a = edPositionOf(ed.anchor);
-    const b = edPositionOf(uid);
-    const [from, to] = a < b ? [a, b] : [b, a];
-    const range = ed.pages.slice(from, to + 1).map((p) => p.uid);
-    ed.selection = toggle ? new Set([...ed.selection, ...range]) : new Set(range);
-  } else if (toggle) {
-    if (ed.selection.has(uid)) ed.selection.delete(uid);
-    else ed.selection.add(uid);
-    ed.anchor = uid;
-  } else {
-    ed.selection = new Set([uid]);
-    ed.anchor = uid;
-  }
+  ed.clickPage(uid, { toggle: e.ctrlKey || e.metaKey, range: e.shiftKey });
   edRefreshSelection();
 }
 
@@ -288,16 +172,18 @@ function edRefreshSelection() {
     cell.classList.toggle("selected", ed.selection.has(Number(cell.dataset.uid)));
   });
   edUpdateStatus();
-  document.dispatchEvent(new CustomEvent("editor:selection"));
 }
 
 function edSelectUids(uids) {
-  ed.selection = new Set(uids);
-  ed.anchor = uids.length ? uids[0] : null;
+  ed.select(uids);
   edRefreshSelection();
 }
 
-const edSelectAll = () => edSelectUids(ed.pages.map((p) => p.uid));
+const edSelectAll = () => {
+  if (!ed) return;
+  ed.selectAll();
+  edRefreshSelection();
+};
 const edSelectNone = () => edSelectUids([]);
 
 // ---------- drag to reorder ----------
@@ -307,35 +193,21 @@ function edClearDropMarks() {
   document.getElementById("edit-grid").classList.remove("drop-end");
 }
 
-// Moves the pages `uids` (kept in their current relative order) next to `targetUid`;
-// targetUid === null means "to the very end".
-function edMoveBlock(uids, targetUid, after) {
-  const set = new Set(uids);
-  if (targetUid !== null && set.has(targetUid)) return;
-  const moving = ed.pages.filter((p) => set.has(p.uid));
-  const rest = ed.pages.filter((p) => !set.has(p.uid));
-  const at = targetUid === null ? rest.length : rest.findIndex((p) => p.uid === targetUid) + (after ? 1 : 0);
-  const next = [...rest.slice(0, at), ...moving, ...rest.slice(at)];
-  if (next.every((p, i) => p.uid === ed.pages[i].uid)) return;
-  ed.pages = next;
-  edCommit();
-}
-
 function edBindDrag(cell, page) {
   cell.addEventListener("dragstart", (e) => {
     if (!ed.selection.has(page.uid)) edSelectUids([page.uid]);
-    ed.dragUids = ed.pages.filter((p) => ed.selection.has(p.uid)).map((p) => p.uid);
+    edDragUids = ed.pages.filter((p) => ed.selection.has(p.uid)).map((p) => p.uid);
     e.dataTransfer.effectAllowed = "move";
     e.dataTransfer.setData("text/plain", String(page.uid));
     document.querySelectorAll("#edit-grid .page-cell.selected").forEach((c) => c.classList.add("dragging"));
   });
   cell.addEventListener("dragend", () => {
-    ed.dragUids = null;
+    edDragUids = null;
     document.querySelectorAll("#edit-grid .dragging").forEach((c) => c.classList.remove("dragging"));
     edClearDropMarks();
   });
   cell.addEventListener("dragover", (e) => {
-    if (!ed.dragUids) return;
+    if (!edDragUids) return;
     e.preventDefault();
     e.stopPropagation();
     const rect = cell.getBoundingClientRect();
@@ -344,22 +216,22 @@ function edBindDrag(cell, page) {
     cell.classList.add(after ? "drop-after" : "drop-before");
   });
   cell.addEventListener("drop", (e) => {
-    if (!ed.dragUids) return;
+    if (!edDragUids) return;
     e.preventDefault();
     e.stopPropagation();
     const rect = cell.getBoundingClientRect();
     const after = e.clientX > rect.left + rect.width / 2;
-    const uids = ed.dragUids;
-    ed.dragUids = null;
+    const uids = edDragUids;
+    edDragUids = null;
     edClearDropMarks();
-    edMoveBlock(uids, page.uid, after);
+    ed.moveBlock(uids, page.uid, after);
   });
 }
 
 function edBindGridDrop() {
   const grid = document.getElementById("edit-grid");
   grid.addEventListener("dragover", (e) => {
-    if (!ed.dragUids) return;
+    if (!edDragUids) return;
     e.preventDefault();
     edClearDropMarks();
     grid.classList.add("drop-end");
@@ -368,46 +240,20 @@ function edBindGridDrop() {
     if (e.target === grid) grid.classList.remove("drop-end");
   });
   grid.addEventListener("drop", (e) => {
-    if (!ed.dragUids) return;
+    if (!edDragUids) return;
     e.preventDefault();
-    const uids = ed.dragUids;
-    ed.dragUids = null;
+    const uids = edDragUids;
+    edDragUids = null;
     edClearDropMarks();
-    edMoveBlock(uids, null, false);
+    ed.moveBlock(uids, null, false);
   });
-}
-
-// ---------- rotate ----------
-
-// Applies to the selection, or to the whole document when nothing is selected.
-function edRotate(degrees) {
-  const targets = ed.selection.size ? ed.pages.filter((p) => ed.selection.has(p.uid)) : ed.pages;
-  targets.forEach((p) => {
-    p.rot = (p.rot + degrees) % 360;
-  });
-  edCommit();
 }
 
 // ---------- move by page number ----------
 
-// Moves pages `nums` (1-based, current numbering) to just after page `after` (0 = front).
-function edMovePages(nums, after) {
-  const total = ed.pages.length;
-  if (!Number.isInteger(after) || after < 0 || after > total) throw new Error(`目標位置需介於 0 到 ${total}`);
-  const moving = nums.map((n) => ed.pages[n - 1]);
-  const movingSet = new Set(moving.map((p) => p.uid));
-  const anchor = after > 0 ? ed.pages[after - 1] : null;
-  if (anchor && movingSet.has(anchor.uid)) throw new Error(`第 ${after} 頁本身也在要移動的頁面中，請改選其他位置`);
-  const rest = ed.pages.filter((p) => !movingSet.has(p.uid));
-  const at = anchor ? rest.findIndex((p) => p.uid === anchor.uid) + 1 : 0;
-  ed.pages = [...rest.slice(0, at), ...moving, ...rest.slice(at)];
-  edCommit();
-  edSelectUids(moving.map((p) => p.uid));
-}
-
 function edOpenMoveDialog() {
   const total = ed.pages.length;
-  const pos = edSelectedPositions();
+  const pos = ed.selectedPositions();
   const fromInput = h("input", { type: "text", value: pos.length ? edCompactRange(pos) : "", placeholder: "例如 5 或 5-7,9" });
   const toInput = h("input", { type: "number", min: "0", max: String(total), value: "0" });
   const err = h("div", { class: "dialog-error" });
@@ -428,7 +274,7 @@ function edOpenMoveDialog() {
         primary: true,
         onClick: () => {
           try {
-            edMovePages(edParseRange(fromInput.value, total), Number(toInput.value));
+            ed.movePages(edParseRange(fromInput.value, total), Number(toInput.value));
           } catch (e) {
             err.textContent = e.message;
             return true;
@@ -459,9 +305,8 @@ function edSourcePicker(onChange) {
       info.textContent = item.error_message || "檔案無法開啟";
       return;
     }
-    ed.sources[item.id] = { id: item.id, name: item.name, page_count: item.page_count, status: item.status, pages: null };
-    await edLoadInfo(item.id);
-    picked = ed.sources[item.id];
+    const details = await apiFetch(`${API}/files/${item.id}/info`);
+    picked = ed.addSource(item, details.pages);
     info.textContent = `${item.name}（共 ${item.page_count} 頁）`;
     onChange(picked);
   }
@@ -492,8 +337,8 @@ function edSourcePicker(onChange) {
     // Files uploaded for a dialog that never made it into the document are discarded.
     cleanup() {
       uploaded.forEach((id) => {
-        if (ed.history.some((snap) => snap.includes(`"src":"${id}"`))) return;
-        delete ed.sources[id];
+        if (ed.referencesFile(id)) return;
+        ed.forgetSource(id);
         apiFetch(`${API}/files/${id}`, { method: "DELETE" }).catch(() => {});
       });
     },
@@ -501,15 +346,6 @@ function edSourcePicker(onChange) {
 }
 
 // ---------- insert another PDF ----------
-
-function edInsertPages(source, nums, after) {
-  const total = ed.pages.length;
-  if (!Number.isInteger(after) || after < 0 || after > total) throw new Error(`插入位置需介於 0 到 ${total}`);
-  const fresh = nums.map((n) => edNewPage(source.id, n - 1));
-  ed.pages = [...ed.pages.slice(0, after), ...fresh, ...ed.pages.slice(after)];
-  edCommit();
-  edSelectUids(fresh.map((p) => p.uid));
-}
 
 function edOpenInsertDialog() {
   const total = ed.pages.length;
@@ -548,7 +384,7 @@ function edOpenInsertDialog() {
           try {
             const text = rangeInput.value.trim();
             const nums = text ? edParseRange(text, src.page_count) : Array.from({ length: src.page_count }, (_, i) => i + 1);
-            edInsertPages(src, nums, Number(afterInput.value));
+            ed.insertPages(src.id, nums, Number(afterInput.value));
           } catch (e) {
             err.textContent = e.message;
             return true;
@@ -588,25 +424,9 @@ function edBuildCompareRow(targetPos, oldPage, newSource, newIdx) {
   );
 }
 
-// pairs: [{pos (1-based current position), srcIdx (0-based)}]
-function edApplyReplace(source, pairs) {
-  const fresh = [];
-  pairs.forEach(({ pos, srcIdx }) => {
-    const page = edNewPage(source.id, srcIdx, 0);
-    const old = ed.pages[pos - 1];
-    ed.bookmarks.forEach((b) => {
-      if (b.target === old.uid) b.target = page.uid;
-    });
-    ed.pages[pos - 1] = page;
-    fresh.push(page.uid);
-  });
-  edCommit();
-  edSelectUids(fresh);
-}
-
 function edOpenReplaceDialog() {
   const total = ed.pages.length;
-  const pos = edSelectedPositions();
+  const pos = ed.selectedPositions();
   const srcRange = h("input", { type: "text", placeholder: "例如 1-2", disabled: true });
   const targetRange = h("input", { type: "text", value: pos.length ? edCompactRange(pos) : "", placeholder: "例如 3-4" });
   const err = h("div", { class: "dialog-error" });
@@ -677,7 +497,7 @@ function edOpenReplaceCompare(source, pairs, picker) {
     ),
     actions: [
       { label: "取消" },
-      { label: "確認取代", primary: true, onClick: () => { edApplyReplace(source, pairs); } },
+      { label: "確認取代", primary: true, onClick: () => { ed.replacePages(source.id, pairs); } },
     ],
     onClose: () => picker.cleanup(),
   });
@@ -932,9 +752,7 @@ function edOpenNumberingDialog() {
             if (!Number.isFinite(stamp.start_number) || stamp.start_number < 0) return fail("起始號碼不可為負數");
             if (!Number.isFinite(stamp.font_size) || stamp.font_size < 4 || stamp.font_size > 72) return fail("字型大小需介於 4–72");
           }
-          ed.labels = rules.map((r) => ({ ...r })).sort((a, b) => a.start - b.start);
-          ed.numbering = stampOn ? { ...stamp } : null;
-          edCommit();
+          ed.applyPageNumbers(rules.map((r) => ({ ...r })).sort((a, b) => a.start - b.start), stampOn ? { ...stamp } : null);
         },
       },
     ],
@@ -1107,8 +925,7 @@ function edOpenBookmarkDialog() {
             err.textContent = `第 ${blank + 1} 個書籤沒有標題`;
             return true;
           }
-          ed.bookmarks = items.map((b) => ({ ...b, title: b.title.trim() }));
-          edCommit();
+          ed.applyBookmarks(items.map((b) => ({ ...b, title: b.title.trim() })));
         },
       },
     ],
@@ -1122,7 +939,7 @@ function edOpenStampDialog() {
   let stamps = ed.stamps.map((st) => ({ ...st, scope: { ...st.scope, uids: [...(st.scope.uids || [])] } }));
   let nextId = Math.max(0, ...stamps.map((st) => st.id)) + 1;
   let selectedId = stamps.length ? stamps[0].id : null;
-  let cur = ed.selection.size ? Math.max(0, edPositionOf([...ed.selection][0])) : 0;
+  let cur = ed.selection.size ? Math.max(0, ed.positionOf([...ed.selection][0])) : 0;
   const uploaded = [];
   let objectUrl = null;
   let loadToken = 0;
@@ -1333,7 +1150,7 @@ function edOpenStampDialog() {
     const rangeInput = h("input", {
       type: "text",
       placeholder: "例如 1-3,5",
-      value: st.scope.mode === "pages" ? edCompactRange(st.scope.uids.map((u) => edPositionOf(u) + 1).filter((n) => n > 0).sort((a, b) => a - b)) : "",
+      value: st.scope.mode === "pages" ? edCompactRange(st.scope.uids.map((u) => ed.positionOf(u) + 1).filter((n) => n > 0).sort((a, b) => a - b)) : "",
     });
     const radio = (value, label, extra) =>
       h(
@@ -1481,11 +1298,12 @@ function edOpenStampDialog() {
               return true;
             }
           }
-          ed.stamps = stamps.map((st) => {
-            const { custom, ...scope } = st.scope;
-            return { ...st, scope };
-          });
-          edCommit();
+          ed.applyStamps(
+            stamps.map((st) => {
+              const { custom, ...scope } = st.scope;
+              return { ...st, scope };
+            })
+          );
         },
       },
     ],
@@ -1494,7 +1312,7 @@ function edOpenStampDialog() {
       if (objectUrl) URL.revokeObjectURL(objectUrl);
       // images uploaded in this dialog that ended up unused are discarded again
       uploaded.forEach((id) => {
-        if (ed.history.some((snap) => snap.includes(`"file":"${id}"`))) return;
+        if (ed.referencesFile(id)) return;
         apiFetch(`${API}/files/${id}`, { method: "DELETE" }).catch(() => {});
       });
     },
@@ -1508,7 +1326,7 @@ function edOpenStampDialog() {
 // ---------- single page preview ----------
 
 function edOpenPreview(startUid) {
-  let pos = edPositionOf(startUid);
+  let pos = ed.positionOf(startUid);
   if (pos < 0) return;
   const stageImg = h("img", { alt: "" });
   const label = h("span", {});
@@ -1721,8 +1539,8 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("edit-select-all").addEventListener("click", edSelectAll);
   document.getElementById("edit-select-none").addEventListener("click", edSelectNone);
   document.getElementById("edit-export-btn").addEventListener("click", edOpenExportDialog);
-  document.getElementById("edit-undo").addEventListener("click", edUndo);
-  document.getElementById("edit-redo").addEventListener("click", edRedo);
+  document.getElementById("edit-undo").addEventListener("click", () => ed.undo());
+  document.getElementById("edit-redo").addEventListener("click", () => ed.redo());
   document.getElementById("edit-move-btn").addEventListener("click", edOpenMoveDialog);
   document.getElementById("edit-insert-btn").addEventListener("click", edOpenInsertDialog);
   document.getElementById("edit-replace-btn").addEventListener("click", edOpenReplaceDialog);
@@ -1730,20 +1548,20 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("edit-bookmark-btn").addEventListener("click", edOpenBookmarkDialog);
   document.getElementById("edit-stamp-btn").addEventListener("click", edOpenStampDialog);
   document.querySelectorAll("#edit-toolbar [data-rotate]").forEach((btn) => {
-    btn.addEventListener("click", () => edRotate(Number(btn.dataset.rotate)));
+    btn.addEventListener("click", () => ed.rotate(Number(btn.dataset.rotate)));
   });
   edBindGridDrop();
 
   document.addEventListener("keydown", (e) => {
-    if (!document.getElementById("tab-edit").classList.contains("active") || edTypingInField(e)) return;
+    if (!ed || !document.getElementById("tab-edit").classList.contains("active") || edTypingInField(e)) return;
     if (document.querySelector(".modal-backdrop")) return;
     const mod = e.ctrlKey || e.metaKey;
     if (mod && e.key.toLowerCase() === "z") {
       e.preventDefault();
-      e.shiftKey ? edRedo() : edUndo();
+      e.shiftKey ? ed.redo() : ed.undo();
     } else if (mod && e.key.toLowerCase() === "y") {
       e.preventDefault();
-      edRedo();
+      ed.redo();
     } else if (mod && e.key.toLowerCase() === "a") {
       e.preventDefault();
       edSelectAll();
