@@ -451,3 +451,32 @@ test("the summary counts a stamp none of whose pages remain", () => {
   assert.equal(s.summary().lostStamps, 1);
   assert.deepEqual(s.recipe("x.pdf").stamps, []);
 });
+
+test("referencedFiles lists every page source and stamp image, including undo history", () => {
+  const s = open({}, 1);
+  assert.deepEqual(s.referencedFiles(), ["base"]);
+  s.addSource(item("other", 1), pagesInfo(1));
+  s.insertPages("other", [1], 1);
+  s.applyStamps([stamp(s.stampScope("all"))]);
+  assert.deepEqual(s.referencedFiles().sort(), ["base", "img", "other"]);
+  s.undo();
+  s.undo();
+  assert.deepEqual(s.referencedFiles().sort(), ["base", "img", "other"]);
+});
+
+test("a source that was added but never used is not referenced", () => {
+  const s = open({}, 1);
+  s.addSource(item("other", 1), pagesInfo(1));
+  assert.deepEqual(s.referencedFiles(), ["base"]);
+  assert.equal(s.referencesFile("other"), false);
+});
+
+test("a file stops being referenced once undo can no longer reach it", () => {
+  const s = open({}, 1);
+  s.addSource(item("other", 1), pagesInfo(1));
+  s.insertPages("other", [1], 1);
+  s.undo();
+  for (let i = 0; i < 100; i++) s.rotate(90);
+  assert.equal(s.referencesFile("other"), false);
+  assert.deepEqual(s.referencedFiles(), ["base"]);
+});

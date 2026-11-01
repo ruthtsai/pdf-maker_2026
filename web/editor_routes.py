@@ -83,13 +83,21 @@ class EditExport(BaseModel):
 # ---------- helpers ----------
 
 
+def hold_or_404(file_ids: list[str]) -> store.Hold:
+    """Holds the files for a job, so idle sweeps and deletion wait until it ends."""
+    try:
+        return store.hold(file_ids)
+    except KeyError:
+        raise HTTPException(404, detail="找不到檔案（可能已閒置過久被清除，請重新開啟）")
+
+
 def _pdf_item(file_id: str) -> FileItem:
     item = store.get(file_id)
     if not item:
         raise HTTPException(404, detail="找不到檔案（可能已閒置過久被清除，請重新開啟）")
     if item.file_type != FileType.PDF:
         raise HTTPException(400, detail="只支援 PDF 檔案")
-    if item.status == FileStatus.ENCRYPTED and file_id not in store.passwords:
+    if item.status == FileStatus.ENCRYPTED and store.password(file_id) is None:
         raise HTTPException(403, detail="PDF 有密碼保護，請先輸入密碼")
     if item.status == FileStatus.ERROR:
         raise HTTPException(400, detail=item.error_message or "檔案無法開啟")
@@ -113,7 +121,7 @@ def _recipe_from_request(body: EditExport) -> tuple[editor.EditRecipe, dict[str,
             continue
         item = _pdf_item(page.src)
         sources[page.src] = editor.Source(
-            path=Path(item.stored_path), name=item.original_name, password=store.passwords.get(page.src)
+            path=Path(item.stored_path), name=item.original_name, password=store.password(page.src)
         )
         page_counts[page.src] = item.page_count
 
@@ -152,7 +160,7 @@ def _recipe_from_request(body: EditExport) -> tuple[editor.EditRecipe, dict[str,
 def document_info(file_id: str):
     item = _pdf_item(file_id)
     try:
-        return render.inspect_document(Path(item.stored_path), store.passwords.get(file_id))
+        return render.inspect_document(Path(item.stored_path), store.password(file_id))
     except PdfEncryptedError as exc:
         raise HTTPException(403, detail=str(exc))
 
@@ -176,7 +184,7 @@ def page_image(
     item = _pdf_item(file_id)
     try:
         data = render.render_page(
-            file_id, Path(item.stored_path), page_index, w, store.passwords.get(file_id), fmt, annots=not form
+            file_id, Path(item.stored_path), page_index, w, store.password(file_id), fmt, annots=not form
         )
     except PdfEncryptedError as exc:
         raise HTTPException(403, detail=str(exc))
@@ -198,8 +206,7 @@ def export_edit(body: EditExport):
         name += ".pdf"
     output_path = file_utils.new_output_path(name)
 
-    file_ids = list(sources)
-    store.mark_active(file_ids)
+    hold = hold_or_404([*sources, *(st.file_id for st in body.stamps)])
     job = job_manager.create()
 
     def task(job: Job):
@@ -210,7 +217,7 @@ def export_edit(body: EditExport):
         except PdfEncryptedError as exc:
             raise RuntimeError(str(exc)) from exc
         finally:
-            store.unmark_active(file_ids)
+            hold.release()
 
     job_manager.run(job, task)
     return {"job_id": job.id, "page_count": len(recipe.pages)}
@@ -236,7 +243,7 @@ def preview_edit_page(body: EditExport, index: int = Query(0, ge=0), w: int = Qu
 def form_fields(file_id: str):
     item = _pdf_item(file_id)
     try:
-        return forms.detect_fields(Path(item.stored_path), store.passwords.get(file_id))
+        return forms.detect_fields(Path(item.stored_path), store.password(file_id))
     except PdfEncryptedError as exc:
         raise HTTPException(403, detail=str(exc))
 
@@ -249,7 +256,7 @@ def fill_form(body: FormFill):
         name += ".pdf"
     output_path = file_utils.new_output_path(name)
 
-    store.mark_active([item.id])
+    hold = hold_or_404([item.id])
     job = job_manager.create()
 
     def task(job: Job):
@@ -260,14 +267,14 @@ def fill_form(body: FormFill):
                 body.values,
                 body.radios,
                 flatten=body.flatten,
-                password=store.passwords.get(item.id),
+                password=store.password(item.id),
                 progress_cb=job.progress_cb,
                 cancel_check=job.cancel_check,
             )
         except (PdfEncryptedError, forms.FormError) as exc:
             raise RuntimeError(str(exc)) from exc
         finally:
-            store.unmark_active([item.id])
+            hold.release()
 
     job_manager.run(job, task)
     return {"job_id": job.id}

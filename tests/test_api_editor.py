@@ -106,7 +106,7 @@ def test_export_filename_is_sanitized(client, tmp_path):
     _, job = export(client, [{"src": a["id"], "idx": 0}], name="../../evil.pdf")
     assert job["status"] == "done"
     assert ".." not in job["download_url"]
-    assert store.files  # sanity: store populated by uploads
+    assert store.get(a["id"])  # sanity: the upload is still there
 
 
 def test_encrypted_pdf_blocked_until_unlocked(client, tmp_path):

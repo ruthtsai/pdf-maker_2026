@@ -13,6 +13,7 @@ import { h, openModal } from "./ui.js";
 
 const ED_BOX = 150; // thumbnail box (CSS px)
 const ED_THUMB_W = 280; // thumbnail image width requested from the server
+const ED_HEARTBEAT_MS = 5 * 60 * 1000; // the server sweeps files idle for 30 minutes
 
 let ed = null; // the current Edit Session; replaced whenever another file is opened
 let edDragUids = null; // uids being dragged while a reorder drag is active
@@ -121,6 +122,34 @@ async function edStartSession(item) {
   document.getElementById("edit-workspace").classList.remove("hidden");
   edRender();
   previous.filter((id) => id !== item.id).forEach((id) => apiFetch(`${API}/files/${id}`, { method: "DELETE" }).catch(() => {}));
+}
+
+// ---------- keeping files alive ----------
+// Reordering, rotating and bookmarks never reach the server, so the files the session
+// uses are reported regularly; otherwise the server would sweep them as idle.
+
+function edFileName(id) {
+  if (ed.sources[id]) return ed.sources[id].name;
+  const st = ed.stamps.find((s) => s.file === id);
+  return st ? st.name : id;
+}
+
+async function edHeartbeat() {
+  if (!ed) return;
+  const session = ed;
+  let missing;
+  try {
+    ({ missing } = await apiFetch(`${API}/files/heartbeat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ file_ids: session.referencedFiles() }),
+    }));
+  } catch {
+    return; // the server may be restarting; try again next time
+  }
+  if (session !== ed || !missing.length) return;
+  const names = missing.map(edFileName).join("、");
+  showError(`伺服器上已找不到這些檔案，編輯內容無法再匯出：${names}。請重新開啟檔案。`);
 }
 
 // ---------- rendering ----------
@@ -1455,6 +1484,7 @@ document.addEventListener("DOMContentLoaded", () => {
     btn.addEventListener("click", () => ed.rotate(Number(btn.dataset.rotate)));
   });
   edBindGridDrop();
+  setInterval(edHeartbeat, ED_HEARTBEAT_MS);
 
   document.addEventListener("keydown", (e) => {
     if (!ed || !document.getElementById("tab-edit").classList.contains("active") || edTypingInField(e)) return;
