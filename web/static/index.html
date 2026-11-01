@@ -17,6 +17,7 @@
   <button class="tab-btn active" data-tab="merge">合併</button>
   <button class="tab-btn" data-tab="convert">PDF 轉影像</button>
   <button class="tab-btn" data-tab="split">拆分</button>
+  <button class="tab-btn" data-tab="compress">壓縮</button>
   <button class="tab-btn" data-tab="edit">編輯頁面</button>
   <button class="tab-btn" data-tab="form">填寫表單</button>
 </nav>
@@ -158,6 +159,43 @@
     </div>
 
     <div id="split-result" class="result-area hidden"></div>
+  </section>
+
+  <!-- ============ 壓縮頁籤 ============ -->
+  <section id="tab-compress" class="tab-panel">
+    <div class="dropzone" id="compress-dropzone">
+      <p>拖曳要壓縮的 PDF 到這裡，或</p>
+      <button id="compress-add-btn" class="btn">選擇 PDF</button>
+      <input id="compress-file-input" type="file" accept=".pdf" hidden />
+    </div>
+
+    <div id="compress-info" class="pdf-info hidden"></div>
+
+    <div class="options-row">
+      <label>壓縮等級
+        <select id="opt-compress-level">
+          <option value="light">輕度：無損整理，不動影像</option>
+          <option value="standard" selected>標準：影像降到 150 DPI、JPEG 品質 75</option>
+          <option value="strong">強力：影像降到 100 DPI、JPEG 品質 60</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="action-row">
+      <button id="compress-start-btn" class="btn btn-primary" disabled>開始壓縮</button>
+      <label id="compress-save-as-row" class="save-as-toggle hidden">
+        <input id="compress-save-as" type="checkbox" />
+        另存為（選擇儲存位置）
+      </label>
+    </div>
+
+    <div id="compress-progress" class="progress-area hidden">
+      <div class="progress-bar"><div class="progress-bar-fill"></div></div>
+      <span class="progress-label"></span>
+      <button class="btn btn-cancel">取消</button>
+    </div>
+
+    <div id="compress-result" class="result-area hidden"></div>
   </section>
 
   <!-- ============ 編輯頁面頁籤 ============ -->

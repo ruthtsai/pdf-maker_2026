@@ -5,6 +5,7 @@ const PAGE_RANGE_RE = /^(\d+(-\d+)?)(,\s*\d+(-\d+)?)*$/;
 let mergeFiles = [];
 let convertFile = null;
 let splitFile = null;
+let compressFile = null;
 
 // ---------- generic helpers ----------
 
@@ -182,6 +183,7 @@ function showResultError(prefix, message) {
   area.textContent = `處理失敗：${message}`;
 }
 
+// Resolves with the finished job (null if its status could not be read).
 function watchJob(jobId, prefix, saveTarget) {
   const cancelBtn = document.querySelector(`#${prefix}-progress .btn-cancel`);
   cancelBtn.onclick = () =>
@@ -195,7 +197,7 @@ function watchJob(jobId, prefix, saveTarget) {
       } catch (err) {
         hideProgress(prefix);
         showError(`查詢工作狀態失敗：${err.message}`);
-        resolve();
+        resolve(null);
         return;
       }
       if (job.status === "pending" || job.status === "running") {
@@ -221,7 +223,7 @@ function watchJob(jobId, prefix, saveTarget) {
       } else {
         showResultError(prefix, job.error || "處理失敗");
       }
-      resolve();
+      resolve(job);
     };
     poll();
   });
@@ -661,6 +663,74 @@ async function startSplit() {
   }
 }
 
+// ---------- compress tab ----------
+
+async function handleCompressFile(fileList) {
+  const item = await uploadSinglePdf(fileList);
+  if (!item) return;
+  compressFile = item;
+  renderCompressInfo();
+}
+
+function renderCompressInfo() {
+  renderPdfInfo("compress", compressFile, (updated) => {
+    compressFile = updated;
+    renderCompressInfo();
+  });
+}
+
+function formatBytes(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(2)} MB`;
+}
+
+function showCompressSizes(details) {
+  const line = document.createElement("div");
+  line.style.marginBottom = "8px";
+  line.style.fontWeight = "600";
+  line.textContent = details.compressed
+    ? `原始大小 ${formatBytes(details.original_size)} → 壓縮後 ${formatBytes(details.compressed_size)}，節省 ${(details.saved_ratio * 100).toFixed(1)}%`
+    : `原始大小 ${formatBytes(details.original_size)}，壓縮後沒有變小`;
+  document.getElementById("compress-result").prepend(line);
+}
+
+async function startCompress() {
+  if (!compressFile) return;
+  const btn = document.getElementById("compress-start-btn");
+
+  let saveTarget = null;
+  if (document.getElementById("compress-save-as").checked && saveAsSupported()) {
+    try {
+      const handle = await window.showSaveFilePicker({
+        suggestedName: `${compressFile.name.replace(/\.pdf$/i, "")}_compressed.pdf`,
+        types: [{ description: "PDF", accept: { "application/pdf": [".pdf"] } }],
+      });
+      saveTarget = { type: "file", handle };
+    } catch (err) {
+      if (err.name === "AbortError") return;
+      showError(`無法選擇儲存位置：${err.message}`);
+      return;
+    }
+  }
+
+  btn.disabled = true;
+  hideResult("compress-result");
+  try {
+    const { job_id } = await apiFetch(`${API}/compress`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ file_id: compressFile.id, level: document.getElementById("opt-compress-level").value }),
+    });
+    const job = await watchJob(job_id, "compress", saveTarget);
+    if (job && job.status === "done" && job.details) showCompressSizes(job.details);
+  } catch (err) {
+    showError(`壓縮失敗：${err.message}`);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 // ---------- init ----------
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -670,6 +740,7 @@ document.addEventListener("DOMContentLoaded", () => {
     document.getElementById("merge-save-as-row").classList.remove("hidden");
     document.getElementById("convert-save-as-row").classList.remove("hidden");
     document.getElementById("split-save-as-row").classList.remove("hidden");
+    document.getElementById("compress-save-as-row").classList.remove("hidden");
   }
 
   setupDropzone(
@@ -694,6 +765,13 @@ document.addEventListener("DOMContentLoaded", () => {
 
   document.getElementById("merge-start-btn").addEventListener("click", startMerge);
   document.getElementById("split-start-btn").addEventListener("click", startSplit);
+  setupDropzone(
+    document.getElementById("compress-dropzone"),
+    document.getElementById("compress-file-input"),
+    document.getElementById("compress-add-btn"),
+    handleCompressFile
+  );
+  document.getElementById("compress-start-btn").addEventListener("click", startCompress);
   document.getElementById("opt-split-mode").addEventListener("change", (e) => {
     document.getElementById("opt-split-ranges-label").classList.toggle("hidden", e.target.value !== "ranges");
     document.getElementById("opt-split-every-label").classList.toggle("hidden", e.target.value !== "every");

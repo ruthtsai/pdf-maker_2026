@@ -9,7 +9,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from core import file_utils, splitter
+from core import compressor, file_utils, splitter
 from core.file_utils import PdfEncryptedError
 from core.jobs import Job, job_manager
 from models.file_item import FileItem, FileStatus, FileType
@@ -24,6 +24,11 @@ class SplitOptions(BaseModel):
     mode: Literal["ranges", "every"] = "ranges"
     ranges: str = ""
     every: int = 1
+
+
+class CompressOptions(BaseModel):
+    file_id: str
+    level: Literal["light", "standard", "strong"] = "standard"
 
 
 def _ready_pdf(file_id: str) -> FileItem:
@@ -76,3 +81,38 @@ def start_split(options: SplitOptions):
 
     job_manager.run(job, task)
     return {"job_id": job.id, "parts": len(groups), "file_name": file_name}
+
+
+@router.post("/api/compress")
+def start_compress(options: CompressOptions):
+    item = _ready_pdf(options.file_id)
+    output_path = file_utils.output_dir() / uuid.uuid4().hex / f"{_base_name(item)}_compressed.pdf"
+    hold = hold_or_404([item.id])
+    job = job_manager.create()
+
+    def task(job: Job):
+        try:
+            result = compressor.compress_pdf(
+                Path(item.stored_path),
+                output_path,
+                options.level,
+                password=store.password(item.id),
+                progress_cb=job.progress_cb,
+                cancel_check=job.cancel_check,
+            )
+        except PdfEncryptedError as exc:
+            raise RuntimeError(str(exc)) from exc
+        finally:
+            hold.release()
+        job.details = {
+            "original_size": result.original_size,
+            "compressed_size": result.compressed_size,
+            "saved_ratio": round(result.saved_ratio, 4),
+            "compressed": result.compressed,
+        }
+        if not result.compressed:
+            job.warning = "這份檔案已無法再壓縮，輸出的是原檔的副本。"
+        return result.path
+
+    job_manager.run(job, task)
+    return {"job_id": job.id, "file_name": output_path.name}

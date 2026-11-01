@@ -84,6 +84,7 @@ def _job_to_json(job: Job) -> dict:
         "total": job.total,
         "message": job.message,
         "warning": job.warning,
+        "details": job.details,
         "error": job.error,
     }
     if job.status == JobStatus.DONE and job.result is not None:

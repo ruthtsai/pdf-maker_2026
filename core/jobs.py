@@ -26,6 +26,7 @@ class Job:
     total: int = 0
     message: str = ""
     warning: str | None = None
+    details: dict[str, Any] | None = None  # extra facts about the result, for the UI to show
     error: str | None = None
     result: Any = None
     cancel_event: threading.Event = field(default_factory=threading.Event)
